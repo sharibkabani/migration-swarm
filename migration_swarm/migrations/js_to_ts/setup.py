@@ -106,11 +106,14 @@ def install_types(ctx: RunContext, analysis: Analysis, node_major: int) -> list[
                 if ver.strip():
                     found.append(name)
     specs = [f"@types/node@{node_major}", f"typescript@{TS_VERSION}", *found]
+    if not ctx.cfg.get("js_to_ts", {}).get("install_types", True):
+        ctx.log(f"setup: install_types disabled; not installing {specs}")
+        return []
     _install_dev(ctx, specs)
     return specs
 
 
-def write_tsconfig(ctx: RunContext, style: str, node_major: int, allow_js: bool = True) -> str:
+def write_tsconfig(ctx: RunContext, style: str, node_major: int, allow_js: bool = True, node_types: bool = True) -> str:
     name = TSCONFIG_DEFAULT if not (ctx.workdir / TSCONFIG_DEFAULT).exists() or _is_ours(ctx) else TSCONFIG_FALLBACK
     module, resolution = ("preserve", "bundler") if style == "esm-bundled" else ("nodenext", "nodenext")
     cfg = {
@@ -126,7 +129,7 @@ def write_tsconfig(ctx: RunContext, style: str, node_major: int, allow_js: bool 
             "skipLibCheck": True,
             "useDefineForClassFields": True,
             "forceConsistentCasingInFileNames": True,
-            "types": ["node"],
+            "types": ["node"] if node_types else [],
             "outDir": "dist",
         },
         "include": list(ctx.repo.source_dirs),
@@ -169,12 +172,15 @@ def setup(ctx: RunContext, analysis: Analysis) -> dict:
     ctx.log("setup: baseline test run on the untouched repo")
     baseline = run_tests(ctx, overlay=None)
     ctx.log(f"setup: baseline ok={baseline.ok} passed={baseline.passed} failed={baseline.failed} skipped={baseline.skipped}")
+    if not baseline.ok or baseline.passed == 0:
+        raise SetupFailed("the test suite does not pass on the untouched repo, so behaviour cannot be judged: "
+                          + baseline.tail[-1500:])
 
     node_major = _node_major(ctx)
     style = _module_style(ctx, analysis)
     ctx.log(f"setup: node {node_major}, module style {style}; installing @types")
     installed = install_types(ctx, analysis, node_major)
-    tsconfig = write_tsconfig(ctx, style, node_major)
+    tsconfig = write_tsconfig(ctx, style, node_major, node_types=any(s.startswith("@types/node") for s in installed))
 
     ctx.log("setup: gate - emit untouched JS through tsc and rerun tests on the emitted JS")
     res = judge_request(ctx, tsconfig, "orig_emit", emit=True, normalize=analysis.files, norm_dir="orig_norm")
@@ -190,8 +196,7 @@ def setup(ctx: RunContext, analysis: Analysis) -> dict:
         raise SetupFailed(f"tests on tsc-emitted original JS differ from baseline: gate={gate.to_json()} baseline={baseline.to_json()}")
 
     protected = integrity.snapshot(ctx.workdir, ctx.repo.test_paths, regex=DEFAULT_TEST_RE)
-    ctx.git("add", "-A")
-    ctx.git("commit", "-q", "-m", "migration-swarm: setup (tsconfig, @types)", "--allow-empty")
+    ctx.commit("migration-swarm: setup (tsconfig, @types)")
     setup_commit = ctx.git("rev-parse", "HEAD")
     info = {
         "baseline": baseline.to_json(), "gate": gate.to_json(), "node_major": node_major, "module_style": style,

@@ -48,6 +48,17 @@ class RunContext:
     def git(self, *args: str, check: bool = True) -> str:
         return subprocess.run(["git", *args], cwd=self.workdir, check=check, capture_output=True, text=True).stdout.strip()
 
+    def commit(self, *messages: str, paths: tuple[str, ...] = ("-A",)) -> bool:
+        """Stage and commit; a no-op (returns False) when nothing changed, so re-runs are idempotent."""
+        self.git("add", *paths)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=self.workdir).returncode == 0:
+            return False
+        args = ["commit", "-q"]
+        for m in messages:
+            args += ["-m", m]
+        self.git(*args)
+        return True
+
     def save_meta(self) -> None:
         meta = {"run_id": self.run_id, "migration": self.migration, "workdir": str(self.workdir),
                 "source_repo": self.source_repo, "repo": asdict(self.repo)}

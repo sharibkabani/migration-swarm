@@ -58,6 +58,12 @@ def parse(runner: str, output: str, exit_ok: bool, seconds: float = 0.0) -> Test
             r.failed, r.skipped, r.passed = failed, pending, total - failed - pending
         block = out.split("Failures:", 1)[1] if "Failures:" in out else ""
         r.failing = sorted(set(re.findall(r"^\d+\) (.+?)\s*$", block, re.M)))
+    elif runner == "node-test":
+        for k, key in (("passed", "pass"), ("failed", "fail"), ("skipped", "skipped")):
+            m = re.findall(rf"^[#ℹ] {key} (\d+)$", out, re.M)
+            if m:
+                setattr(r, k, int(m[-1]))
+        r.failing = sorted(set(re.findall(r"^\s*not ok \d+ - (.+)$", out, re.M)))
     else:
         r.passed = 1 if exit_ok else 0
         r.failed = 0 if exit_ok else 1
