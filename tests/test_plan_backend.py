@@ -96,7 +96,7 @@ def test_baseline_auth_modes(monkeypatch):
 
 def test_plan_call_sets_adaptive_thinking_and_maps_output_cap(monkeypatch):
     import claude_agent_sdk
-    from claude_agent_sdk import ResultMessage
+    from claude_agent_sdk import ResultError, ResultMessage
 
     seen = {}
 
@@ -105,8 +105,28 @@ def test_plan_call_sets_adaptive_thinking_and_maps_output_cap(monkeypatch):
         yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=True, num_turns=1,
                             session_id="s", result="API Error: Claude's response exceeded the 9000 output token maximum.",
                             usage={"input_tokens": 3, "output_tokens": 9000})
+        # like the real SDK: the error result is yielded, then ResultError is raised as the CLI exits 1
+        raise ResultError("Claude Code returned an error result", {"subtype": "success"}, exit_code=1)
 
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
     r = asyncio.run(plan_llm.plan_call("anthropic:claude-haiku-5-5", "medium", 9000, "s", "u"))
     assert seen["thinking"] == {"type": "adaptive"}
     assert r.stop_reason == "max_tokens" and r.usage.output_tokens == 9000
+
+
+def test_plan_call_turns_usage_limit_into_plan_rate_limited(monkeypatch):
+    import claude_agent_sdk
+    from claude_agent_sdk import RateLimitEvent, ResultError, ResultMessage
+    from claude_agent_sdk.types import RateLimitInfo
+
+    async def fake_query(prompt, options):
+        yield RateLimitEvent(rate_limit_info=RateLimitInfo(status="rejected", resets_at=1_900_000_000,
+                                                           rate_limit_type="five_hour"), uuid="u", session_id="s")
+        yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=True, num_turns=1,
+                            session_id="s", result="You've hit your limit", api_error_status=429)
+        raise ResultError("Claude Code returned an error result", {"subtype": "success"}, exit_code=1)
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    with pytest.raises(plan_llm.PlanRateLimited) as e:
+        asyncio.run(plan_llm.plan_call("anthropic:claude-haiku-5-5", "medium", 9000, "s", "u"))
+    assert e.value.resets_at == 1_900_000_000 and e.value.limit_type == "five_hour"

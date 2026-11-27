@@ -69,8 +69,8 @@ def disable_api_key() -> None:
 
 
 async def plan_call(model: str, effort: str, max_tokens: int, system: str, user: str, on_text=None) -> PlanReply:
-    from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, RateLimitEvent, ResultMessage, StreamEvent,
-                                  TextBlock, query)
+    from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, RateLimitEvent, ResultError, ResultMessage,
+                                  StreamEvent, TextBlock, query)
 
     opts = ClaudeAgentOptions(
         # thinking: adaptive explicitly, as the Messages API does by default for these models. Without it
@@ -87,20 +87,26 @@ async def plan_call(model: str, effort: str, max_tokens: int, system: str, user:
     result = None
     streamed: list[str] = []
     last = 0.0
-    async for m in query(prompt=user, options=opts):
-        if isinstance(m, StreamEvent):
-            d = m.event.get("delta") or {}
-            if m.event.get("type") == "content_block_delta" and d.get("type") == "text_delta":
-                streamed.append(d.get("text", ""))
-                if on_text and time.monotonic() - last > 0.4:
-                    last = time.monotonic()
-                    on_text("".join(streamed))
-        elif isinstance(m, AssistantMessage):
-            texts += [b.text for b in m.content if isinstance(b, TextBlock)]
-        elif isinstance(m, RateLimitEvent) and m.rate_limit_info.status == "rejected":
-            rejected = m.rate_limit_info
-        elif isinstance(m, ResultMessage):
-            result = m
+    # On a failed run the SDK yields the error ResultMessage and then raises ResultError when the CLI
+    # exits non-zero. The result message has everything we need, so handle that below instead.
+    try:
+        async for m in query(prompt=user, options=opts):
+            if isinstance(m, StreamEvent):
+                d = m.event.get("delta") or {}
+                if m.event.get("type") == "content_block_delta" and d.get("type") == "text_delta":
+                    streamed.append(d.get("text", ""))
+                    if on_text and time.monotonic() - last > 0.4:
+                        last = time.monotonic()
+                        on_text("".join(streamed))
+            elif isinstance(m, AssistantMessage):
+                texts += [b.text for b in m.content if isinstance(b, TextBlock)]
+            elif isinstance(m, RateLimitEvent) and m.rate_limit_info.status == "rejected":
+                rejected = m.rate_limit_info
+            elif isinstance(m, ResultMessage):
+                result = m
+    except ResultError:
+        if result is None:
+            raise
     if result is None:
         raise RuntimeError("Claude Agent SDK returned no result")
     if result.is_error:
