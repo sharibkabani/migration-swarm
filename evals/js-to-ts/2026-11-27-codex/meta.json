@@ -1,0 +1,18 @@
+{
+  "date": "2026-11-27",
+  "systems": [
+    "codex-single-interactive"
+  ],
+  "repos": [
+    "cheerio"
+  ],
+  "runs": 1,
+  "manifest": "benchmarks/js_to_ts/manifest.yaml",
+  "budget": null,
+  "engine_commit": "4962320",
+  "target_start": "8b0792d91bb97233abd1087bfdc010444118de97",
+  "target_end": "7921c6ef77ecca930a8fb8209da0626fed80af8e",
+  "wall_start_epoch": 1795817639,
+  "candidate_committed_epoch": 1795817959,
+  "scoring_finished_epoch": 1795817987
+}
