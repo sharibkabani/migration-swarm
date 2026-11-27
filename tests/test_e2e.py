@@ -93,6 +93,8 @@ def test_end_to_end_with_mocked_llm(tmp_path, monkeypatch):
     # 5 units' first attempts... (4 units: cycle is one) + 1 retry + 1 steward call, all metered
     assert report["cost"]["calls"] == len(FakeChat.calls) == 6
     assert report["cost"]["spent_usd"] > 0
+    assert any("Compiler-inferred starting draft" in prompt and "// file: lib/format.ts" in prompt
+               for prompt in FakeChat.calls)
     # the retry prompt carried the exact rejection reason
     retry = [c for c in FakeChat.calls if "REJECTED" in c][0]
     assert "explicit_any = 1 (allowed 0)" in retry

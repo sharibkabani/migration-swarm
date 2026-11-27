@@ -64,7 +64,8 @@ def build(ctx: RunContext, pack, state: dict) -> dict:
         "plan_limit_wait_s": round(getattr(ctx.llm, "paused_s", 0.0), 1),
         "repo": {"files": len(a.get("files", [])), "loc": a.get("total_loc", 0), "cycles": a.get("cycles", []),
                  "units": len(units), "layers": len(state.get("layers") or [])},
-        "setup": {k: v for k, v in (state.get("setup") or {}).items() if k not in ("protected",)},
+        "setup": {k: v for k, v in (state.get("setup") or {}).items() if k not in ("protected", "initial_drafts")},
+        "model_call_s_by_unit": {uid: u["model_call_s"] for uid, u in units.items() if "model_call_s" in u},
         "result": {
             "files_by_status": dict(status_count),
             "escalation_rate": round(escalated / n_units, 3),
@@ -105,6 +106,10 @@ def render_md(r: dict) -> str:
         f"Retries per unit: {res['retries_per_unit']}  ·  escalation rate: {res['escalation_rate']}  ·  degraded files: {res['degraded_files']}",
         "",
     ]
+    timings = r.get("model_call_s_by_unit", {})
+    if timings:
+        lines += ["## Longest cumulative model-call times", "",
+                  *[f"- `{uid}` · {secs:.1f}s" for uid, secs in sorted(timings.items(), key=lambda kv: -kv[1])[:5]], ""]
     if fin and "tsc_errors" in fin:
         t = fin["tests"]
         lines += ["## Final checks", "",

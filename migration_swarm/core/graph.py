@@ -57,6 +57,20 @@ def ladder(attempt: int, n: int) -> tuple[str, bool] | None:
     return None
 
 
+def retry_context(history: list[dict], seed: dict | None = None) -> dict | None:
+    if not history:
+        return seed
+    previous = seed["previous"] if seed else None
+    reasons = list(seed["reasons"]) if seed else []
+    for entry in history:
+        if entry.get("output_files"):
+            previous = entry["output_files"]
+            reasons = []
+        reasons.extend(entry["reasons"])
+    return {"previous": previous, "reasons": list(dict.fromkeys(reasons))}
+
+
+
 def build(ctx: RunContext, pack) -> StateGraph:
     cfg = ctx.cfg
     n_retries = int(cfg["retries_before_escalation"])
@@ -117,6 +131,7 @@ def build(ctx: RunContext, pack) -> StateGraph:
         system, user = await asyncio.to_thread(pack.worker_prompt, ctx, setup, files, retry, degraded)
         ctx.emit("agent_start", agent=uid, role=role, unit=uid, files=files, model=ctx.llm.model_for(model_role),
                  attempt=n, degraded=degraded)
+        started = time.monotonic()
         try:
             size = sum((ctx.workdir / f).stat().st_size for f in files if (ctx.workdir / f).exists())
             r = await ctx.llm.complete(role, system, user, key=uid, model_role=model_role,
@@ -131,20 +146,28 @@ def build(ctx: RunContext, pack) -> StateGraph:
             return {"error": "token_cap", "detail": str(e)}
         except Exception as e:  # API failure after SDK retries: count as a failed attempt, keep going
             ctx.log(f"worker {uid}: LLM error {type(e).__name__}: {e}")
-            ctx.emit("agent_done", agent=uid, unit=uid, error=f"{type(e).__name__}: {e}"[:200])
-            return {"error": "llm_error", "detail": f"{type(e).__name__}: {e}"[:500], "attempt": n}
+            elapsed = round(time.monotonic() - started, 3)
+            ctx.emit("agent_done", agent=uid, unit=uid, error=f"{type(e).__name__}: {e}"[:200], model_call_s=elapsed)
+            return {"error": "llm_error", "detail": f"{type(e).__name__}: {e}"[:500], "attempt": n,
+                    "model_call_s": elapsed}
+        elapsed = round(time.monotonic() - started, 3)
         runs.write_status(ctx)  # persist spend now, so a crash before judging still counts this call
-        out_files, requests, problems = pack.parse_worker_output(r.text, files, (retry or {}).get("previous"))
+        outcomes = {}
+        out_files, requests, problems = pack.parse_worker_output(r.text, files, (retry or {}).get("previous"),
+                                                                 outcomes=outcomes)
         if r.stop_reason == "max_tokens":
             problems.append("the reply was cut off at the output token limit")
         ctx.emit("agent_done", agent=uid, unit=uid, cost_usd=r.cost_usd, stop_reason=r.stop_reason,
-                 tokens=r.usage.prompt_tokens + r.usage.output_tokens, problems=problems[:2])
+                 tokens=r.usage.prompt_tokens + r.usage.output_tokens, problems=problems[:2],
+                 output_by_file=outcomes, model_call_s=elapsed)
         return {"files": out_files, "problems": problems, "requests": requests, "model": r.model, "cost": r.cost_usd,
-                "attempt": n, "degraded": degraded}
+                "attempt": n, "degraded": degraded, "model_call_s": elapsed}
 
     def settle(uid: str, u: dict, c: dict, unit_files: dict, k: int, accepted_units: list[str]) -> tuple[dict, list]:
         """Apply one candidate to its unit: record errors, or judge it. Returns (unit, shared-type requests)."""
         u = dict(u)
+        if "model_call_s" in c:
+            u["model_call_s"] = round(u.get("model_call_s", 0) + c["model_call_s"], 3)
         requests: list = []
         if c.get("error") == "token_cap":
             u["status"] = "failed"
@@ -224,6 +247,7 @@ def build(ctx: RunContext, pack) -> StateGraph:
         for uid, u in units.items():
             if u["status"] != "pending":
                 resolved[uid].set()
+        completed_at = {}
         sem = asyncio.Semaphore(int(ctx.cfg["concurrency"]))
         stop: dict = {"reason": None}
         steward_log: list = []
@@ -240,16 +264,29 @@ def build(ctx: RunContext, pack) -> StateGraph:
                 ev.set()
 
         async def run_unit(uid: str) -> None:
-            for d in deps[uid]:
+            waiting_since = time.monotonic()
+            pending_deps = [d for d in deps[uid] if not resolved[d].is_set()]
+            for d in pending_deps:
                 await resolved[d].wait()
+            if stop["reason"]:
+                return
+            ready_at = time.monotonic()
+            last_dependency = max(pending_deps, key=completed_at.__getitem__, default=None)
             requests: list = []
             async with sem:
+                ctx.emit("unit_start", unit=uid, last_dependency=last_dependency,
+                         dependency_wait_s=round(ready_at - waiting_since, 3),
+                         slot_wait_s=round(time.monotonic() - ready_at, 3))
                 u = units[uid]
+                drafts = setup.get("initial_drafts", {})
+                seed = None
+                if all(f in drafts for f in unit_files[uid]):
+                    seed = {"inferred": True, "previous": {}, "reasons": []}
+                    for f in unit_files[uid]:
+                        seed["previous"].update(drafts[f]["files"])
+                        seed["reasons"].extend(drafts[f]["reasons"])
                 while not stop["reason"] and u["status"] == "pending" and (step := ladder(u["attempts"], n_retries)):
-                    last = u["history"][-1] if u["history"] else None
-                    # the latest real draft, even if the last reply had no usable file (e.g. cut off)
-                    prev = next((h["output_files"] for h in reversed(u["history"]) if h.get("output_files")), None)
-                    retry = {"reasons": last["reasons"], "previous": prev} if last else None
+                    retry = retry_context(u["history"], seed)
                     c = await attempt(uid, unit_files[uid], setup, u["attempts"], step[0], step[1], retry)
                     if c.get("error") in ("budget", "cancelled", "plan_limit"):  # not an attempt; unit stays pending
                         halt(c["error"])
@@ -269,6 +306,7 @@ def build(ctx: RunContext, pack) -> StateGraph:
                 if why:
                     halt(why)
                     return
+            completed_at[uid] = time.monotonic()
             resolved[uid].set()
 
         ctx.emit("phase", phase="migrate", detail=f"{len(units)} units; each starts when the files it imports are done")

@@ -35,27 +35,27 @@ WORKER_SYSTEM = """You convert JavaScript modules to strict TypeScript, one modu
 {module_rules}
 4. Only import type names that exist: for npm packages, use the exported names listed in the request (taken from the installed type declarations); if a name you want is not listed, derive the type instead (`ReturnType<typeof fn>`, `Parameters<...>`, indexed access) or declare a local interface. Types of other project modules are given as declarations. Reuse them via `import type`; do not redeclare them. The declarations of not-yet-migrated modules are inferred from JavaScript and may be loose; type your side precisely anyway.
 5. If a type is shared by several modules and does not exist yet, declare it locally and also request it from the shared-types steward (it will be added to `{shared_path}` for later modules).
-6. Keep comments and JSDoc. You may turn JSDoc types into TypeScript types.
+6. Keep comments and JSDoc. You may turn JSDoc types into TypeScript types."""
 
-Reply with exactly this format and nothing else:
+FULL_FORMAT = """Reply with exactly this format and nothing else:
 ```ts
 // file: <path of the .ts file>
 <complete file content>
 ```
 (one such block per file when you are given several files), then optionally:
 ```json
-{{"shared_type_requests": [{{"name": "Name", "definition": "export interface Name {{ ... }}", "reason": "why it is shared"}}]}}
+{"shared_type_requests": [{"name": "Name", "definition": "export interface Name { ... }", "reason": "why it is shared"}]}
 ```"""
 
-EDIT_FORMAT = """Reply with edits to your previous attempt instead of rewriting the file: one block per change,
+EDIT_FORMAT = """Edit the supplied TypeScript draft: one block per change,
 
 <<<<<<< SEARCH <path of the .ts file>
-<lines copied exactly from your previous attempt>
+<lines copied exactly from the supplied draft>
 =======
 <the replacement lines>
 >>>>>>> REPLACE
 
-Each SEARCH text must match your previous attempt exactly (same indentation) and occur exactly once in that
+Each SEARCH text must match the supplied draft exactly (same indentation) and occur exactly once in that
 file; include a line or two of context to make it unique. Every change you need must be in an edit. If the
 file needs extensive changes, return the complete file as a ```ts block instead. The optional ```json
 shared_type_requests block may follow either way."""
@@ -107,14 +107,13 @@ def worker_messages(*, style: str, shared_path: str, files: dict[str, str], deps
     if dependents:
         parts.append("Modules that import this one (keep the exported API compatible): " + ", ".join(dependents[:30]))
     if retry:
-        parts.append("Your previous attempt was REJECTED by the judge. Fix every problem below.")
-        parts.append("Rejection reasons:\n" + "\n".join(f"- {r}" for r in retry["reasons"]))
+        parts.append("Compiler-inferred starting draft. Finish the migration and address the diagnostics below."
+                     if retry.get("inferred") else "Your previous attempt was REJECTED by the judge. Fix every problem below.")
+        parts.append("Diagnostics and feedback:\n" + "\n".join(f"- {r}" for r in retry["reasons"]))
         if retry.get("previous"):
             prev = "\n".join(f"```ts\n// file: {p}\n{c}\n```" for p, c in retry["previous"].items())
-            parts.append("Your previous attempt:\n" + prev)
-            parts.append(EDIT_FORMAT)
-        else:
-            parts.append("Return the complete files again.")
+            parts.append("Draft to edit:\n" + prev)
+    system += "\n\n" + (EDIT_FORMAT if retry and retry.get("previous") else FULL_FORMAT)
     if degraded:
         parts.append(DEGRADED_NOTE)
     return system, "\n\n".join(parts)
@@ -155,8 +154,8 @@ def apply_edits(text: str, previous: dict[str, str], problems: list[str]) -> dic
     return {p: c for p, c in out.items() if p not in bad}
 
 
-def parse_worker_output(text: str, expected: list[str], previous: dict[str, str] | None = None
-                        ) -> tuple[dict[str, str], list[dict], list[str]]:
+def parse_worker_output(text: str, expected: list[str], previous: dict[str, str] | None = None,
+                        *, outcomes: dict | None = None) -> tuple[dict[str, str], list[dict], list[str]]:
     """Returns ({ts_path: content}, shared_type_requests, problems). With `previous` (a rejected attempt),
     SEARCH/REPLACE edits are applied to it; a full ```ts block for a file takes precedence over edits."""
     files: dict[str, str] = {}
@@ -181,7 +180,9 @@ def parse_worker_output(text: str, expected: list[str], previous: dict[str, str]
             unnamed.append(body)
     if unnamed and len(expected_ts) == 1 and expected_ts[0] not in files:
         files[expected_ts[0]] = unnamed[0]
-    if previous and EDIT.search(text):
+    full_paths = set(files)
+    edit_paths = {m[0] for m in EDIT.findall(text)}
+    if previous and edit_paths:
         edited = apply_edits(text, previous, problems)
         files = {**{p: c for p, c in edited.items() if p not in files}, **files}
     for p in list(files):
@@ -191,6 +192,16 @@ def parse_worker_output(text: str, expected: list[str], previous: dict[str, str]
     for p in expected_ts:
         if p not in files:
             problems.append(f"no ```ts block for `{p}` in the reply" + (" (and no edits that applied)" if previous else ""))
+    if outcomes is not None:
+        for p in expected_ts:
+            if p in full_paths:
+                outcomes[p] = "full_file"
+            elif p in edit_paths:
+                outcomes[p] = "applied_edit" if p in files else "rejected_edit"
+            else:
+                outcomes[p] = "unchanged" if p in files else "no_usable_output"
+        for p in edit_paths - set(expected_ts):
+            outcomes[p] = "rejected_edit"
     return {p: (c if c.endswith("\n") else c + "\n") for p, c in files.items()}, requests, problems
 
 

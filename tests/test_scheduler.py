@@ -30,5 +30,8 @@ def test_unit_starts_when_its_imports_are_done_not_its_layer(tmp_path, monkeypat
     assert t("agent_start", "lib/format.js") < t("verdict", "lib/a.js")
     # ... and index.js (imports a and format) waits for both
     assert t("agent_start", "lib/index.js") > t("verdict", "lib/a.js")
+    start = next(e for e in ev if e["kind"] == "unit_start" and e["unit"] == "lib/format.js")
+    assert start["last_dependency"] == "lib/constants.js" and start["dependency_wait_s"] > 0
     report = json.loads((ctx.run_dir / "report.json").read_text())
+    assert report["model_call_s_by_unit"]["lib/a.js"] >= 8
     assert report["complete"] and report["result"]["files_by_status"] == {"accepted": 5}

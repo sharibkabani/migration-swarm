@@ -41,3 +41,38 @@ def test_full_file_block_beats_edits_and_works_without_previous():
     assert files["lib/a.ts"] == "export const k = 1;\n" and problems == []
     files, _, problems = parse_worker_output("```ts\n// file: lib/a.ts\nexport const k = 1;\n```", ["lib/a.js"])
     assert files["lib/a.ts"] == "export const k = 1;\n" and problems == []
+
+
+def test_retry_preserves_feedback_for_the_exact_draft_after_cutoffs():
+    from migration_swarm.core.graph import retry_context
+
+    history = [{"output_files": {"lib/a.ts": "older"}, "reasons": ["stale"]},
+               {"output_files": PREV, "reasons": ["TS2322 at line 2"]},
+               {"output_files": None, "reasons": ["cut off"]}]
+    assert retry_context(history) == {"previous": PREV, "reasons": ["TS2322 at line 2", "cut off"]}
+    seed = {"inferred": True, "previous": PREV, "reasons": ["TS7006"]}
+    assert retry_context([], seed) == seed
+    assert retry_context(history[-1:], seed)["reasons"] == ["TS7006", "cut off"]
+
+
+def test_prompt_selects_one_output_format():
+    from migration_swarm.migrations.js_to_ts.prompts import EDIT_FORMAT, FULL_FORMAT, worker_messages
+
+    args = dict(style="cjs", shared_path="shared.ts", files={"lib/a.js": "f(1)"},
+                deps_dts={}, shared_types=None, dependents=[], degraded=False)
+    first, _ = worker_messages(**args, retry=None)
+    retry, _ = worker_messages(**args, retry={"previous": PREV, "reasons": ["type error"]})
+    assert FULL_FORMAT in first and EDIT_FORMAT not in first
+    assert EDIT_FORMAT in retry and FULL_FORMAT not in retry
+
+
+def test_parsed_edit_outcomes():
+    for reply, expected in [
+        (edit("lib/a.ts", "  return x.y;\n", "  return 2;\n"), "applied_edit"),
+        (edit("lib/a.ts", "absent\n", "value\n"), "rejected_edit"),
+        ("no blocks", "no_usable_output"),
+        ("```ts\nexport const x = 1;\n```", "full_file"),
+    ]:
+        outcomes = {}
+        parse_worker_output(reply, ["lib/a.js"], PREV, outcomes=outcomes)
+        assert outcomes == {"lib/a.ts": expected}

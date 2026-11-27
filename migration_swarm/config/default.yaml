@@ -96,6 +96,9 @@ escape_budgets:
 # Budgets lifted (set to unlimited) for the final "degraded" attempt. @ts-ignore/@ts-nocheck never are.
 degraded_lifts: [explicit_any, as_cast, non_null_assertion, as_unknown_as]
 
+js_to_ts:
+  infer_from_usage: true  # Set false to benchmark retries without compiler-assisted drafts.
+
 judge:
   bisect_max_test_runs: 12
   test_timeout_s: 3600

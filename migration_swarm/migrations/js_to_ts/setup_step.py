@@ -235,5 +235,14 @@ def setup(ctx: RunContext, analysis: Analysis) -> dict:
         "tsconfig": tsconfig, "installed": installed, "protected": protected, "setup_commit": setup_commit,
         "shared_types_path": shared_types_path(ctx), "npm_exports": npm_exports,
     }
+    if ctx.cfg.get("js_to_ts", {}).get("infer_from_usage", True):
+        result = tools.run_tool(ctx.workdir, f"node /opt/msw/scripts/infer.mjs {shlex.quote(tsconfig)} /analysis.json",
+                                mounts=[sandbox.Mount(ctx.run_dir / "analysis.json", "/analysis.json")])
+        if result.ok:
+            drafts = json.loads(result.output)
+            info["initial_drafts"] = drafts
+            ctx.log(f"setup: compiler inferred useful annotations in {len(drafts)} files ({result.duration_s:.1f}s)")
+        else:
+            ctx.log(f"setup: compiler inference unavailable; using original sources: {result.output[-500:]}")
     (ctx.run_dir / "setup.json").write_text(json.dumps(info, indent=1))
     return info

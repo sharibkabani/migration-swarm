@@ -320,3 +320,19 @@ from plan limits when signed in with a plan. Direct Messages API calls are not c
 - **Test:** `tests/test_scheduler.py` makes the `a↔b` cycle slow and checks that `format.js`,
   which only imports `constants.js`, starts before the cycle is resolved. Under layers it couldn't
   have.
+
+## 11. Compiler-assisted drafts and retry measurements
+
+During setup the JS→TS pack runs TypeScript's infer-from-usage code fix in the read-only,
+network-disabled tools container. Each source file is viewed as TypeScript in memory, with the
+rest of the project at its original revision. The pass keeps standalone annotation insertions
+that contain no explicit `any`, parse successfully together and reduce the file's semantic
+diagnostic count. Workers receive the draft and up to 30 remaining diagnostics when every file
+in their unit has a useful draft. The normal judge checks the worker's candidate against the
+current dependency tree. Set `js_to_ts.infer_from_usage: false` to benchmark retries alone.
+
+When a response is truncated or unusable, the next worker sees the most recent usable draft,
+its rejection reasons and subsequent delivery failures. In `events.jsonl`, worker
+`agent_done.output_by_file` records how each file was returned, and `unit_start` records the
+last dependency to finish, dependency wait and worker-slot wait for this scheduling session.
+The report ranks units by cumulative model-call time. These times overlap across workers.
