@@ -24,3 +24,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["migration_swarm"]
+
+[tool.pytest.ini_options]
+markers = ["docker: needs a local Docker daemon"]
+testpaths = ["tests"]

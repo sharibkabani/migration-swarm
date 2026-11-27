@@ -1,0 +1,9 @@
+{
+  "name": "msw-js-tools",
+  "private": true,
+  "description": "Pinned toolchain for the js-to-ts pack. Runs only inside Docker.",
+  "dependencies": {
+    "typescript": "6.0.3",
+    "dependency-cruiser": "18.9.0"
+  }
+}

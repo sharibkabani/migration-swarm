@@ -1,0 +1,11 @@
+{
+  "src/explicit_any.ts": {"explicit_any": 1},
+  "src/implicit_any.ts": {"implicit_any": 1},
+  "src/ts_ignore.ts": {"ts_ignore": 1},
+  "src/ts_expect_error.ts": {"ts_expect_error": 1},
+  "src/ts_nocheck.ts": {"ts_nocheck": 1},
+  "src/as_unknown_as.ts": {"as_unknown_as": 2},
+  "src/non_null.ts": {"non_null_assertion": 1},
+  "src/as_cast.ts": {"as_cast": 2},
+  "src/clean.ts": {}
+}

@@ -1,7 +1,7 @@
-"""Run untrusted commands (installs, builds, tests) inside a locked-down Docker container.
+"""Run untrusted commands (installs, builds, tests, analyzers) inside a locked-down Docker container.
 
-Only the given workdir is mounted. No home directory, no host env vars, no credentials.
-Network is off unless the caller asks for it (package installs need the registry).
+Only the given workdir (plus explicit extra mounts) is mounted. No home directory, no host env
+vars, no credentials. Network is off unless the caller asks for it (package installs need it).
 """
 
 from __future__ import annotations
@@ -28,6 +28,16 @@ class SandboxResult:
         return self.exit_code == 0 and not self.timed_out
 
 
+@dataclass(frozen=True)
+class Mount:
+    host: Path
+    container: str
+    read_only: bool = True
+
+    def arg(self) -> str:
+        return f"{Path(self.host).resolve()}:{self.container}{':ro' if self.read_only else ''}"
+
+
 def ensure_cache_volume() -> None:
     subprocess.run(["docker", "volume", "create", CACHE_VOLUME], check=True, capture_output=True)
     subprocess.run(
@@ -35,6 +45,10 @@ def ensure_cache_volume() -> None:
          "sh", "-c", f"mkdir -p /cache/npm /cache/yarn && chown -R {CONTAINER_UID} /cache"],
         check=True, capture_output=True,
     )
+
+
+def image_exists(tag: str) -> bool:
+    return subprocess.run(["docker", "image", "inspect", tag], capture_output=True).returncode == 0
 
 
 def run(
@@ -48,15 +62,25 @@ def run(
     memory: str = "6g",
     cpus: str = "4",
     ephemeral: bool = False,
+    overlay: Path | None = None,
+    workdir_read_only: bool = False,
+    mounts: list[Mount] | None = None,
 ) -> SandboxResult:
-    """ephemeral=True mounts the workdir read-only and runs on a throwaway in-container copy.
+    """Run `command` with the workdir at /work.
 
+    ephemeral=True mounts the workdir read-only and runs on a throwaway in-container copy at /tmp/w.
     Use it for test runs: nothing the suite writes reaches the workdir, and the container's own
     filesystem avoids timing races seen on Docker Desktop bind mounts (e.g. hexo's un-awaited unlink).
+    overlay (ephemeral only): a host dir whose files are copied over the throwaway copy first.
     """
     name = f"msw-{uuid.uuid4().hex[:12]}"
+    all_mounts = [Mount(workdir, "/work", read_only=ephemeral or workdir_read_only), *(mounts or [])]
     if ephemeral:
-        command = f"cp -a /work /tmp/w && cd /tmp/w && {command}"
+        prep = "cp -a /work /tmp/w"
+        if overlay is not None:
+            all_mounts.append(Mount(overlay, "/overlay", read_only=True))
+            prep += " && cp -a /overlay/. /tmp/w/"
+        command = f"{prep} && cd /tmp/w && {command}"
     args = [
         "docker", "run", "--rm", "--init", "--name", name,
         "--network", "bridge" if network else "none",
@@ -64,7 +88,6 @@ def run(
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         "--memory", memory, "--cpus", cpus, "--pids-limit", "4096",
-        "-v", f"{workdir.resolve()}:/work{':ro' if ephemeral else ''}",
         "-v", f"{CACHE_VOLUME}:/cache",
         "-w", "/work",
         "-e", "HOME=/tmp/home",
@@ -75,6 +98,8 @@ def run(
         "-e", "npm_config_fund=false",
         "-e", "npm_config_audit=false",
     ]
+    for m in all_mounts:
+        args += ["-v", m.arg()]
     for k, v in (env or {}).items():
         args += ["-e", f"{k}={v}"]
     args += [image, "bash", "-lc", command]
