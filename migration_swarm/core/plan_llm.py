@@ -73,7 +73,11 @@ async def plan_call(model: str, effort: str, max_tokens: int, system: str, user:
                                   TextBlock, query)
 
     opts = ClaudeAgentOptions(
+        # thinking: adaptive explicitly, as the Messages API does by default for these models. Without it
+        # Claude Code uses its own default mode, which on a 19 KB file measured ~65% more output tokens and
+        # ~5x the prompt tokens of the same call with adaptive thinking.
         tools=[], system_prompt=system, model=model.split(":", 1)[-1], max_turns=1, effort=effort,
+        thinking={"type": "adaptive"},
         setting_sources=[], cwd=_cwd(), extra_args={"no-session-persistence": None},
         include_partial_messages=on_text is not None,
         env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(max_tokens), "DISABLE_AUTOUPDATER": "1",
@@ -101,6 +105,11 @@ async def plan_call(model: str, effort: str, max_tokens: int, system: str, user:
         raise RuntimeError("Claude Agent SDK returned no result")
     if result.is_error:
         msg = (result.result or "") + " ".join(result.errors or [])
+        if "output token maximum" in msg:
+            # The API returns a truncated reply with stop_reason max_tokens; Claude Code errors instead.
+            # Report it the API way so the retry tells the model its reply was cut off.
+            return PlanReply("".join(streamed) or "".join(texts), usage_from_sdk(result.usage), "max_tokens",
+                             result.model_usage)
         if rejected is not None or result.api_error_status == 429 or any(
                 w in msg.lower() for w in ("usage limit", "rate limit", "hit your limit", "limit reached")):
             ri = rejected

@@ -92,3 +92,21 @@ def test_baseline_auth_modes(monkeypatch):
         cb._auth({"llm_backend": "plan"})
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "t")
     assert cb._auth({"llm_backend": "plan"}) == ({"CLAUDE_CODE_OAUTH_TOKEN": "t"}, [])
+
+
+def test_plan_call_sets_adaptive_thinking_and_maps_output_cap(monkeypatch):
+    import claude_agent_sdk
+    from claude_agent_sdk import ResultMessage
+
+    seen = {}
+
+    async def fake_query(prompt, options):
+        seen["thinking"] = options.thinking
+        yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=True, num_turns=1,
+                            session_id="s", result="API Error: Claude's response exceeded the 9000 output token maximum.",
+                            usage={"input_tokens": 3, "output_tokens": 9000})
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    r = asyncio.run(plan_llm.plan_call("anthropic:claude-haiku-5-5", "medium", 9000, "s", "u"))
+    assert seen["thinking"] == {"type": "adaptive"}
+    assert r.stop_reason == "max_tokens" and r.usage.output_tokens == 9000

@@ -180,7 +180,14 @@ def run_eval(migration: str, manifest: Path, systems: list[str], *, runs_per_cel
                 print(f"[eval]   -> success={row.get('success')} cost={row.get('cost_usd')} wall={row.get('wall_s')} error={row.get('error')}", flush=True)
 
     keys = [k for _, k, _ in pack.EVAL_TABLE] + ["tokens_in", "tokens_out"]
-    aggs = aggregate([r for r in rows if r["system"] in systems and r["repo"] in meta["repos"]], keys)
+    # One table per output dir: every system run there so far (several invocations can add systems).
+    present = {r["system"] for r in rows} | set(systems)
+    meta["systems"] = [s for s in all_systems if s in present]
+    meta["repos"] = sorted({r["repo"] for r in rows} | set(meta["repos"]))
+    prev = json.loads((out_dir / "meta.json").read_text()) if (out_dir / "meta.json").exists() else {}
+    meta["llm_backend_by_system"] = {**prev.get("llm_backend_by_system", {}),
+                                     **{s: cfg.get("llm_backend", "api") for s in systems if s not in ("ts-migrate",)}}
+    aggs = aggregate([r for r in rows if r["system"] in present and r["repo"] in meta["repos"]], keys)
     fields = sorted({k for r in rows for k in r})
     with (out_dir / "runs.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
