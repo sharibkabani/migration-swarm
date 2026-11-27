@@ -58,7 +58,7 @@ def test_resume_after_crash_does_not_redo_finished_work(tmp_path, monkeypatch):
     report = json.loads((ctx2.run_dir / "report.json").read_text())
     assert report["complete"] and report["result"]["files_by_status"] == {"accepted": 5}
     assert _calls_for("lib/constants.js") == 1 and _calls_for("lib/a.js") == 1   # layer 0 not redone
-    assert calls_before >= 4  # layer-1 worker output survived the crash in the checkpoint
+    assert calls_before >= 4  # the crash hit while judging layer 1, after its worker call; that call is redone
     assert report["cost"]["calls"] == len(FakeChat.calls)                      # cost carried across resume
 
 

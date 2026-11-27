@@ -290,3 +290,18 @@ from plan limits when signed in with a plan. Direct Messages API calls are not c
   plan backend, 24 s). The plugin's exact launch command initializes in 6.4 s cold and 1.3 s warm.
 - **Not verified:** installing through `/plugin install` inside an interactive Claude Code session
   (it needs a human session).
+
+## 9. Per-unit ladders (speed, 2026-11-27)
+
+- **Before:** each retry round waited for every unit in the layer. In an aborted cheerio run,
+  43 of 44.5 minutes were spent waiting on the slowest unit of each round.
+- **Now:** a worker task runs its unit's whole ladder (write → judge → retry → escalate). Judging
+  is serialized under one lock, because it edits the shared clone, and runs on that one candidate
+  plus everything already accepted. Layers and the steward between layers are unchanged.
+- **Output cap:** raised to `16000 + 3 × chars/3`, so adaptive thinking fits. A cut-off reply is a
+  paid call thrown away.
+- **Trade-offs:**
+  - More, smaller test runs. Each is about 6–10 s on cheerio and overlaps with other units' model
+    calls.
+  - A crash while a unit is mid-attempt redoes that attempt on resume. Spend is persisted after
+    every call, so the budget stays exact.

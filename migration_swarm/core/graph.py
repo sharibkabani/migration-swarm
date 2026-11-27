@@ -13,6 +13,7 @@ Retry/escalation ladder per unit (attempt index a, N = retries_before_escalation
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import operator
 import time
@@ -123,94 +124,71 @@ def build(ctx: RunContext, pack) -> StateGraph:
         ctx.emit("layer", index=k, count=len(state["layers"]), units=len(state["layers"][k]))
         return {"candidates": RESET}
 
+    # Each unit runs its own ladder (write -> judge -> retry) inside one worker task, so a unit never waits
+    # for the slowest unit of its layer between attempts. Judging edits the shared clone, so it is serialized.
+    judge_lock = asyncio.Lock()
+    status_of: dict[str, str] = {}  # live unit statuses while a layer runs (shared by its worker tasks)
+
     def fan_out(state: RunState):
         if state.get("stop_reason"):
             return "finalize"
         k = state["layer_idx"]
-        sends = []
-        for uid in state["layers"][k]:
-            u = state["units"][uid]
-            if u["status"] != "pending":
-                continue
-            step = ladder(u["attempts"], n_retries)
-            last = u["history"][-1] if u["history"] else None
-            retry = {"reasons": last["reasons"], "previous": last.get("output_files")} if last else None
-            sends.append(Send("worker", {"uid": uid, "files": state["unit_files"][uid], "attempt": u["attempts"],
-                                         "model_role": step[0], "degraded": step[1], "retry": retry,
-                                         "setup": state["setup"]}))
+        statuses = {uid: u["status"] for uid, u in state["units"].items()}
+        # statuses travel in the payload: on resume, pending Sends come back from the checkpoint without fan_out
+        sends = [Send("worker", {"uid": uid, "unit": state["units"][uid], "layer": k, "unit_files": state["unit_files"],
+                                 "setup": state["setup"], "statuses": statuses})
+                 for uid in state["layers"][k] if state["units"][uid]["status"] == "pending"]
         return sends or "judge"
 
-    async def worker_node(payload: dict) -> dict:
-        uid, files = payload["uid"], payload["files"]
+    async def attempt(uid: str, files: list[str], setup: dict, n: int, model_role: str, degraded: bool,
+                      retry: dict | None) -> dict:
+        """One LLM attempt for a unit -> a candidate (or an error marker)."""
         if cancelled():
-            return {"candidates": {uid: {"error": "cancelled"}}, "stop_reason": "cancelled"}
-        role = "worker" if payload["model_role"] == "worker" else "escalation"
-        system, user = await asyncio.to_thread(pack.worker_prompt, ctx, payload["setup"], files, payload["retry"],
-                                               payload["degraded"])
-        ctx.emit("agent_start", agent=uid, role=role, unit=uid, files=files, model=ctx.llm.model_for(payload["model_role"]),
-                 attempt=payload["attempt"], degraded=payload["degraded"])
+            return {"error": "cancelled"}
+        role = "worker" if model_role == "worker" else "escalation"
+        system, user = await asyncio.to_thread(pack.worker_prompt, ctx, setup, files, retry, degraded)
+        ctx.emit("agent_start", agent=uid, role=role, unit=uid, files=files, model=ctx.llm.model_for(model_role),
+                 attempt=n, degraded=degraded)
         try:
             size = sum((ctx.workdir / f).stat().st_size for f in files if (ctx.workdir / f).exists())
-            r = await ctx.llm.complete(role, system, user, key=uid, model_role=payload["model_role"],
+            r = await ctx.llm.complete(role, system, user, key=uid, model_role=model_role,
                                        expected_output_chars=size or None)
         except BudgetExceeded as e:
             ctx.log(f"budget: {e}")
             why = "plan_limit" if isinstance(e, PlanLimitReached) else "budget"
             ctx.emit("agent_done", agent=uid, unit=uid, error=why)
-            return {"candidates": {uid: {"error": why}}, "stop_reason": why}
+            return {"error": why}
         except TokenCapExceeded as e:
             ctx.emit("agent_done", agent=uid, unit=uid, error="token cap")
-            return {"candidates": {uid: {"error": "token_cap", "detail": str(e)}}}
+            return {"error": "token_cap", "detail": str(e)}
         except Exception as e:  # API failure after SDK retries: count as a failed attempt, keep going
             ctx.log(f"worker {uid}: LLM error {type(e).__name__}: {e}")
             ctx.emit("agent_done", agent=uid, unit=uid, error=f"{type(e).__name__}: {e}"[:200])
-            return {"candidates": {uid: {"error": "llm_error", "detail": f"{type(e).__name__}: {e}"[:500],
-                                         "attempt": payload["attempt"]}}}
+            return {"error": "llm_error", "detail": f"{type(e).__name__}: {e}"[:500], "attempt": n}
+        runs.write_status(ctx)  # persist spend now, so a crash before judging still counts this call
         out_files, requests, problems = pack.parse_worker_output(r.text, files)
         if r.stop_reason == "max_tokens":
             problems.append("the reply was cut off at the output token limit")
         ctx.emit("agent_done", agent=uid, unit=uid, cost_usd=r.cost_usd, stop_reason=r.stop_reason,
                  tokens=r.usage.prompt_tokens + r.usage.output_tokens, problems=problems[:2])
-        runs.write_status(ctx)
-        return {"candidates": {uid: {"files": out_files, "problems": problems, "requests": requests,
-                                     "model": r.model, "cost": r.cost_usd, "attempt": payload["attempt"],
-                                     "degraded": payload["degraded"]}}}
+        return {"files": out_files, "problems": problems, "requests": requests, "model": r.model, "cost": r.cost_usd,
+                "attempt": n, "degraded": degraded}
 
-    def judge_node(state: RunState) -> dict:
-        k = state["layer_idx"]
-        units = {uid: dict(u) for uid, u in state["units"].items()}
-        cands = state.get("candidates") or {}
-        to_judge: dict[str, dict] = {}
+    def settle(uid: str, u: dict, c: dict, unit_files: dict, k: int, accepted_units: list[str]) -> tuple[dict, list]:
+        """Apply one candidate to its unit: record errors, or judge it. Returns (unit, shared-type requests)."""
+        u = dict(u)
         requests: list = []
-        for uid, c in cands.items():
-            u = units[uid]
-            if c.get("error") in ("budget", "cancelled"):
-                continue  # not an attempt; the unit stays pending (reported as not reached)
-            if c.get("error") == "token_cap":
-                u["status"] = "failed"
-                u["history"] = [*u["history"], {"attempt": u["attempts"], "reasons": [c["detail"]]}]
-                continue
-            if c.get("error") == "llm_error":
-                u["attempts"] += 1
-                u["history"] = [*u["history"], {"attempt": c["attempt"], "reasons": [c["detail"]]}]
-                continue
-            if c["problems"] and not c["files"]:
-                u["attempts"] += 1
-                u["history"] = [*u["history"], {"attempt": c["attempt"], "model": c["model"], "reasons": c["problems"],
-                                                "output_files": None}]
-                continue
-            to_judge[uid] = c
-        accepted_units = [uid for uid, u in units.items() if u["status"] in ("accepted", "degraded")]
-        for uid, u in units.items():
-            if uid in cands and uid not in to_judge and u["history"] and cands[uid].get("error") not in ("budget", "cancelled", "plan_limit"):
-                ctx.emit("verdict", unit=uid, files=state["unit_files"][uid],
-                         status="failed" if u["status"] == "failed" else "rejected",
-                         attempt=u["attempts"], reasons=u["history"][-1]["reasons"][:3])
-        if to_judge:
-            ctx.emit("judge_start", layer=k, units=sorted(to_judge))
-        verdicts = pack.judge(ctx, state["setup"], state["unit_files"], to_judge, accepted_units, k) if to_judge else {}
-        for uid, v in verdicts.items():
-            c, u = to_judge[uid], units[uid]
+        if c.get("error") == "token_cap":
+            u["status"] = "failed"
+            u["history"] = [*u["history"], {"attempt": u["attempts"], "reasons": [c["detail"]]}]
+        elif c.get("error") == "llm_error" or (c["problems"] and not c["files"]):
+            u["attempts"] += 1
+            u["history"] = [*u["history"], {"attempt": c["attempt"], "model": c.get("model"),
+                                            "reasons": [c["detail"]] if c.get("error") else c["problems"],
+                                            "output_files": None}]
+        else:
+            ctx.emit("judge_start", layer=k, units=[uid])
+            v = pack.judge(ctx, setup_of["setup"], unit_files, {uid: c}, accepted_units, k)[uid]
             reasons = [*c["problems"], *v["reasons"]] if not v["accepted"] else v["reasons"]
             u["history"] = [*u["history"], {"attempt": c["attempt"], "model": c["model"], "degraded": c["degraded"],
                                             "reasons": reasons, "escapes": v["escapes"],
@@ -220,16 +198,50 @@ def build(ctx: RunContext, pack) -> StateGraph:
                 u["status"] = "degraded" if c["degraded"] else "accepted"
                 u["escapes"] = v["escapes"]
                 u["model"] = c["model"]
-                requests += [{**r, "from": uid} for r in c.get("requests", [])]
-            ctx.emit("verdict", unit=uid, files=state["unit_files"][uid], attempt=u["attempts"],
-                     status=u["status"] if v["accepted"] else "rejected", reasons=reasons[:3])
-        for uid in state["layers"][k]:
-            u = units[uid]
-            if u["status"] == "pending" and ladder(u["attempts"], n_retries) is None:
-                u["status"] = "failed"
-                ctx.log(f"unit {uid}: failed after {u['attempts']} attempts; left as JavaScript")
-                ctx.emit("verdict", unit=uid, files=state["unit_files"][uid], status="failed", attempt=u["attempts"],
-                         reasons=(u["history"][-1]["reasons"] if u["history"] else [])[:3])
+                requests = [{**r, "from": uid} for r in c.get("requests", [])]
+                ctx.emit("verdict", unit=uid, files=unit_files[uid], attempt=u["attempts"], status=u["status"],
+                         reasons=reasons[:3])
+                return u, requests
+        if u["status"] == "pending" and ladder(u["attempts"], n_retries) is None:
+            u["status"] = "failed"
+            ctx.log(f"unit {uid}: failed after {u['attempts']} attempts; left as JavaScript")
+        ctx.emit("verdict", unit=uid, files=unit_files[uid], attempt=u["attempts"],
+                 status="failed" if u["status"] == "failed" else "rejected",
+                 reasons=(u["history"][-1]["reasons"] if u["history"] else [])[:3])
+        return u, requests
+
+    setup_of: dict = {}
+
+    async def worker_node(payload: dict) -> dict:
+        uid, k, unit_files = payload["uid"], payload["layer"], payload["unit_files"]
+        setup_of["setup"] = payload["setup"]
+        for x, st in payload["statuses"].items():
+            status_of.setdefault(x, st)
+        u, requests = dict(payload["unit"]), []
+        while u["status"] == "pending" and (step := ladder(u["attempts"], n_retries)) is not None:
+            last = u["history"][-1] if u["history"] else None
+            retry = {"reasons": last["reasons"], "previous": last.get("output_files")} if last else None
+            c = await attempt(uid, unit_files[uid], payload["setup"], u["attempts"], step[0], step[1], retry)
+            if c.get("error") in ("budget", "cancelled", "plan_limit"):  # not an attempt; the unit stays pending
+                return {"candidates": {uid: {"unit": u, "requests": requests}}, "stop_reason": c["error"]}
+            async with judge_lock:
+                accepted = [x for x, st in status_of.items() if st in ("accepted", "degraded")]
+                u, new = await asyncio.to_thread(settle, uid, u, c, unit_files, k, accepted)
+                status_of[uid] = u["status"]
+                counts = collections.Counter(status_of.values())
+                status(phase="migrate", layer=k, units_done=len(status_of) - counts["pending"],
+                       units_by_status={st: counts[st] for st in ("pending", "accepted", "degraded", "failed")})
+            requests += new
+        return {"candidates": {uid: {"unit": u, "requests": requests}}}
+
+    def judge_node(state: RunState) -> dict:
+        """Collect the layer's finished units (each was judged inside its own worker task)."""
+        k = state["layer_idx"]
+        units = {uid: dict(u) for uid, u in state["units"].items()}
+        requests: list = []
+        for uid, c in (state.get("candidates") or {}).items():
+            units[uid] = c["unit"]
+            requests += c["requests"]
         done = sum(1 for u in units.values() if u["status"] != "pending")
         status(phase="migrate", layer=k, units_done=done,
                units_by_status={s: sum(1 for u in units.values() if u["status"] == s)

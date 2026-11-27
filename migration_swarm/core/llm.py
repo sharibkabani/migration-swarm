@@ -69,14 +69,15 @@ class LLM:
                        expected_output_chars: int | None = None) -> LLMResult:
         """role: agent role for tagging (worker/escalation/steward/planner); model_role picks the model.
 
-        expected_output_chars sizes max_tokens to the job (room for thinking + ~2.5x the expected text),
+        expected_output_chars sizes max_tokens to the job (room for thinking + ~3x the expected text),
         which keeps the worst-case budget reservation realistic. Capped by config max_output_tokens.
         """
         model_role = model_role or role
         model = self.model_for(model_role)
         max_out = int(self.cfg["max_output_tokens"])
         if expected_output_chars is not None:
-            max_out = min(max_out, 8000 + int(expected_output_chars / 3 * 2.5))
+            # room for adaptive thinking on top of the rewritten file; a cut-off reply is a paid, wasted call
+            max_out = min(max_out, 16000 + int(expected_output_chars / 3 * 3))
         est_prompt = (len(system) + len(user)) // 3 + 50
         effort = self.cfg["effort"].get(model_role, "medium")
         if self.backend == "plan":
