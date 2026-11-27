@@ -1,0 +1,34 @@
+{
+  "name": "migration-swarm",
+  "version": "0.1.0",
+  "description": "Migrate codebases (JS -> strict TypeScript first) with a swarm of agents and a deterministic judge: plan, approve, watch, get a branch and a report.",
+  "author": {
+    "name": "sharibkabani",
+    "url": "https://github.com/sharibkabani"
+  },
+  "repository": "https://github.com/sharibkabani/migration-swarm",
+  "keywords": [
+    "migration",
+    "typescript",
+    "agents",
+    "mcp"
+  ],
+  "mcpServers": {
+    "migration-swarm": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "migration-swarm",
+        "mcp"
+      ],
+      "env": {
+        "UV_PROJECT_ENVIRONMENT": "${CLAUDE_PLUGIN_DATA}/venv",
+        "MSW_RUNS_DIR": "${HOME}/.migration-swarm/runs"
+      }
+    }
+  }
+}

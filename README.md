@@ -46,6 +46,28 @@ What the judge requires of every file:
 - compiled output that matches the original JavaScript token for token;
 - your unchanged test suite still passing. Test files are hashed and read-only.
 
+### From Claude Code (plugin: MCP server + skill)
+
+```
+/plugin marketplace add sharibkabani/migration-swarm
+/plugin install migration-swarm@migration-swarm-tools
+```
+
+Then ask Claude something like "migrate this repo to TypeScript with migration-swarm". The skill has
+Claude follow a fixed sequence:
+
+1. Plan the run in the background. Nothing is spent at this step.
+2. Show you the plan and wait for your approval.
+3. Start the run and report progress as it goes.
+4. Summarize the report at the end.
+
+MCP tools: `list_migrations`, `start_migration`, `get_status`, `approve_plan`, `get_report`,
+`cancel` and `list_runs`. The plugin needs [`uv`](https://docs.astral.sh/uv/). On first start it
+installs its own environment into the plugin's data directory, which takes a few seconds. If that
+first start is slow on your network, launch Claude with `MCP_TIMEOUT=120000`.
+
+The server can also run without the plugin: `migration-swarm mcp` (stdio).
+
 ### Non-interactive
 
 ```bash

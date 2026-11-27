@@ -30,7 +30,7 @@ from rich.table import Table
 from rich.text import Text
 
 from migration_swarm import migrations
-from migration_swarm.core import config as config_mod, graph, intent as intent_mod, runs
+from migration_swarm.core import config as config_mod, graph, intent as intent_mod, plansummary, runs
 from migration_swarm.core.budget import CostMeter
 from migration_swarm.core.llm import LLM
 from migration_swarm.core.providers import PROVIDERS
@@ -165,24 +165,6 @@ def choose_repo() -> Path:
 # plan screen
 
 
-def estimate_cost(cfg: dict, analysis: dict, workdir: Path) -> tuple[float, float]:
-    """Rough API-equivalent cost range from file sizes and the escalation ladder."""
-    from migration_swarm.core.budget import Usage, price_usage
-
-    chars = sum((workdir / f).stat().st_size for f in analysis["files"] if (workdir / f).exists())
-    tok = chars / 3.5
-    worker, esc = cfg["models"]["worker"], cfg["models"]["escalation"]
-    n = len(analysis["files"])
-
-    def cost(model, files_tok, calls):
-        u = Usage(input_tokens=int(files_tok * 2.2 + calls * 3500), output_tokens=int(files_tok * 1.3 + calls * 2500))
-        return price_usage(cfg["prices"], model, u)
-
-    low = cost(worker, tok * 1.2, n * 1.2) + cost(esc, tok * 0.15, n * 0.15)
-    high = cost(worker, tok * 2.5, n * 2.5) + cost(esc, tok * 0.8, n * 0.8)
-    return low, min(high, cfg["budget_usd"])
-
-
 def plan_view(it: intent_mod.Intent, state: dict, cfg: dict, ctx, repo: Path) -> Group:
     a = state["analysis"]
     layers = state["layers"]
@@ -218,7 +200,7 @@ def plan_view(it: intent_mod.Intent, state: dict, cfg: dict, ctx, repo: Path) ->
     agents.add_row("workers", f"{short_model(m['worker'])}: {n + 1} tries per file with the judge's exact errors")
     agents.add_row("escalation", f"{short_model(m['escalation'])}: 1 strict try, then 1 'degraded' try (explicit any allowed)")
     agents.add_row("steward", f"{short_model(m['steward'])}: owns the shared types file other agents request types in")
-    low, high = estimate_cost(cfg, a, ctx.workdir)
+    low, high = plansummary.estimate_cost(cfg, a["files"], ctx.workdir)
     billing = ("API-equivalent; not billed, uses your Claude plan's limits" if cfg.get("llm_backend") == "plan"
                else "billed to your API key")
     agents.add_row("budget", f"hard stop at ${cfg['budget_usd']:.2f}  [{DIM}]estimate ${low:.2f}–${high:.2f} ({billing})[/]")

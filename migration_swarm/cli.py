@@ -71,6 +71,7 @@ def run(
     manifest: Optional[Path] = typer.Option(None, help="Take repo settings from a benchmark manifest..."),
     name: Optional[str] = typer.Option(None, help="...entry with this name."),
     run_id: Optional[str] = typer.Option(None),
+    plan_only: bool = typer.Option(False, "--plan-only", help="Analyze and plan, then stop for approval (nothing spent)."),
     provider: Optional[str] = typer.Option(None, help="Model provider: claude | gemini | openai (default claude)."),
     backend: Optional[str] = typer.Option(None, help="LLM backend: 'api' (ANTHROPIC_API_KEY, billed) or 'plan' (Claude Agent SDK on your Claude plan login, not billed)."),
 ) -> None:
@@ -98,7 +99,23 @@ def run(
         raise typer.Exit(2)
     ctx = runs.create(repo_path, migration, spec, cfg, run_id=run_id, ref=ref)
     typer.echo(f"run id: {ctx.run_id}  (dir: {ctx.run_dir})")
+    if plan_only:
+        _plan_only(ctx, pack)
+        return
     _execute(ctx, pack, resume=False)
+
+
+def _plan_only(ctx, pack) -> None:
+    """Analyze and plan, then stop before anything is spent. `migration-swarm approve <run-id>` continues."""
+    async def hold(_state) -> bool:
+        return False
+
+    ctx.llm = LLM(ctx.cfg, ctx.meter, ctx.run_id, ctx.migration, log=ctx.log, emit=ctx.emit)
+    asyncio.run(graph.execute(ctx, pack, approve=hold))
+    if (ctx.run_dir / "plan_summary.json").exists():
+        runs.write_status(ctx, phase="awaiting_approval")
+        typer.echo((ctx.run_dir / "plan_summary.json").read_text())
+        typer.echo(f"\nplan ready; start it with: migration-swarm approve {ctx.run_id}")
 
 
 def _execute(ctx, pack, resume: bool) -> None:
@@ -123,6 +140,22 @@ def resume(run_id: str, budget: Optional[float] = typer.Option(None, help="Raise
     cancel = ctx.run_dir / "CANCEL"
     if cancel.exists():
         cancel.unlink()
+    _execute(ctx, migrations.load(ctx.migration), resume=True)
+
+
+@app.command()
+def mcp() -> None:
+    """Run the MCP server (stdio) for Claude Code and other MCP clients."""
+    _load_dotenv()
+    from migration_swarm import mcp_server
+    mcp_server.main()
+
+
+@app.command()
+def approve(run_id: str) -> None:
+    """Start a run that was planned with --plan-only (or declined in interactive mode)."""
+    _load_dotenv()
+    ctx = runs.load(run_id)
     _execute(ctx, migrations.load(ctx.migration), resume=True)
 
 

@@ -1,0 +1,12 @@
+{
+  "name": "migration-swarm-tools",
+  "description": "migration-swarm: multi-agent codebase migrations with a deterministic judge",
+  "owner": { "name": "sharibkabani" },
+  "plugins": [
+    {
+      "name": "migration-swarm",
+      "source": "./",
+      "description": "Migrate codebases (JS -> strict TypeScript first) with a swarm of agents and a deterministic judge."
+    }
+  ]
+}

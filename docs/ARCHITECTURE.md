@@ -266,3 +266,27 @@ from plan limits when signed in with a plan. Direct Messages API calls are not c
   Prompt caching markers are only sent to Anthropic.
 - **Unverified:** Gemini and OpenAI are wired and construct correctly but haven't been run on a
   benchmark yet.
+
+## 8. Phase 3: MCP server, skill, Claude Code plugin (added 2026-11-27)
+
+- **`migration_swarm/mcp_server.py`** (MCP Python SDK 2.x `MCPServer`, stdio, `migration-swarm mcp`).
+  Tools: `list_migrations`, `start_migration`, `get_status`, `approve_plan`, `get_report`, `cancel`
+  and `list_runs`.
+  - Runs are detached `migration-swarm run` processes, so tool calls return immediately and the
+    client polls.
+  - `start_migration(review_plan=true)` runs `--plan-only`: analyze, plan, write
+    `plan_summary.json`, stop at `awaiting_approval` with nothing spent. `approve_plan` then runs
+    `migration-swarm approve`, which resumes from the checkpoint before setup.
+  - Claude auth `auto` uses the Claude plan login when signed in.
+- **`skills/migration-swarm/SKILL.md`** sets the workflow, including that Claude must show the plan
+  and never approve it on the user's behalf.
+- **Plugin:** `.claude-plugin/plugin.json` declares the MCP server inline. A root `.mcp.json` would
+  also load as a project MCP server in plain checkouts of this repo. `.claude-plugin/marketplace.json`
+  (marketplace `migration-swarm-tools`, source `./`) makes the repo installable.
+  - The server runs with `uv run --frozen --project ${CLAUDE_PLUGIN_ROOT}`. Its environment lives in
+    `${CLAUDE_PLUGIN_DATA}/venv` and runs in `~/.migration-swarm/runs`, so both survive plugin updates.
+  - `claude plugin validate .` passes.
+- **Verified:** a stdio MCP client drove plan → approve → status → report on a fixture repo (Claude
+  plan backend, 24 s). The plugin's exact launch command initializes in 6.4 s cold and 1.3 s warm.
+- **Not verified:** installing through `/plugin install` inside an interactive Claude Code session
+  (it needs a human session).

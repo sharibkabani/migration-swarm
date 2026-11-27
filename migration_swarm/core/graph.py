@@ -23,6 +23,7 @@ from langgraph.types import Send
 
 from migration_swarm.core import planner, report as report_mod, runs
 from migration_swarm.core.budget import BudgetExceeded, TokenCapExceeded
+from migration_swarm.core import plansummary
 from migration_swarm.core.plan_llm import PlanLimitReached
 from migration_swarm.core.context import RunContext
 
@@ -102,6 +103,7 @@ def build(ctx: RunContext, pack) -> StateGraph:
                                                            "unit_files": unit_files}, indent=1))
         status(phase="plan", layers=len(layers), units=len(unit_files))
         ctx.emit("phase", phase="plan", detail=f"{len(unit_files)} units in {len(layers)} layers")
+        plansummary.write(ctx, plansummary.build(ctx, a, [[u.id for u in l] for l in layers], unit_files))
         return {"layers": [[u.id for u in l] for l in layers], "unit_files": unit_files, "units": units, "layer_idx": 0}
 
     def setup_node(state: RunState) -> dict:
