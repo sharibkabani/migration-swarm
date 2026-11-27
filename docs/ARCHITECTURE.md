@@ -218,3 +218,29 @@ redux and helmet, where no clean JS-to-TS commit was found in history.
 2. Claude Code baselines (3.8): **locked-down container**, egress limited to the Anthropic API,
    with a separate spend-limited key.
 3. Emitted-JS drift (3.3): **rejecting** escape type, default budget 0.
+
+## 6. Running on a Claude plan instead of a billed key (`--backend plan`)
+
+Added 2026-11-27 so the benchmark can run on a Pro plan.
+Per https://support.claude.com/en/articles/15036540, `claude -p` and the Claude Agent SDK draw
+from plan limits when signed in with a plan. Direct Messages API calls are not covered.
+
+- **Swarm:** each model call becomes one Claude Agent SDK turn (`core/plan_llm.py`):
+  - no tools, no settings or CLAUDE.md, our own system prompt, no session persistence, an empty cwd;
+  - `ANTHROPIC_API_KEY` is removed from the process so nothing silently bills;
+  - Claude Code adds about 670 tokens per call, cached for 1h;
+  - the reported usage is priced with the same table, so `$` columns are API-equivalent and the
+    budget still applies.
+- **Claude Code baselines:** they use `CLAUDE_CODE_OAUTH_TOKEN` and drop `--bare`, because bare
+  mode never reads OAuth. Output is stream-json so rate-limit events are visible.
+- **Usage limits:**
+  - The swarm pauses all calls until the window resets (shared pause), for at most
+    `plan.max_wait_s` in total, then stops as `plan_limit`; `resume` continues the run.
+  - A baseline that hits the limit is resumed in the same session (`--resume`) after the reset,
+    with the remaining budget.
+  - Waiting time is excluded from wall time and reported as `plan_limit_wait_s`.
+- **Caveats:**
+  - Plan throttling still affects timing between waits, so wall time and parallel speedup are
+    noisier than on the API.
+  - No LangSmith tracing on this path.
+  - Runs share the plan's limits with your own interactive Claude use.

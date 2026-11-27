@@ -8,12 +8,15 @@ Rate limits: the Anthropic SDK retries 429/5xx/connection errors with exponentia
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
 from typing import Callable
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from migration_swarm.core import plan_llm
 from migration_swarm.core.budget import CostMeter, Usage
 
 ChatFactory = Callable[[str, str, int, int], BaseChatModel]  # (model, effort, max_tokens, max_retries)
@@ -37,9 +40,19 @@ class LLMResult:
 
 
 class LLM:
-    def __init__(self, cfg: dict, meter: CostMeter, run_id: str, migration: str, factory: ChatFactory | None = None):
+    def __init__(self, cfg: dict, meter: CostMeter, run_id: str, migration: str, factory: ChatFactory | None = None,
+                 *, plan_caller=None, log: Callable[[str], None] | None = None):
         self.cfg, self.meter, self.run_id, self.migration = cfg, meter, run_id, migration
         self.factory = factory or anthropic_factory
+        self.backend = cfg.get("llm_backend", "api")
+        self.plan_caller = plan_caller or plan_llm.plan_call
+        self.log = log or (lambda m: None)
+        self.paused_s = 0.0          # wall time spent waiting for plan limits to reset
+        self._pause_until = 0.0
+        if self.backend == "plan" and plan_caller is None:
+            plan_llm.disable_api_key()
+        elif self.backend not in ("api", "plan"):
+            raise ValueError(f"llm_backend must be 'api' or 'plan', not {self.backend!r}")
 
     def model_for(self, role: str) -> str:
         return self.cfg["models"][role]
@@ -57,8 +70,11 @@ class LLM:
         if expected_output_chars is not None:
             max_out = min(max_out, 8000 + int(expected_output_chars / 3 * 2.5))
         est_prompt = (len(system) + len(user)) // 3 + 50
+        effort = self.cfg["effort"].get(model_role, "medium")
+        if self.backend == "plan":
+            return await self._complete_plan(model, effort, max_out, est_prompt, system, user, key)
         reservation = self.meter.reserve(model, est_prompt, max_out, key=key)
-        chat = self.factory(model, self.cfg["effort"].get(model_role, "medium"), max_out, int(self.cfg["api_max_retries"]))
+        chat = self.factory(model, effort, max_out, int(self.cfg["api_max_retries"]))
         messages = [
             SystemMessage(content=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]),
             HumanMessage(content=user),
@@ -77,3 +93,31 @@ class LLM:
         cost = self.meter.settle(reservation, model, usage, key=key)
         stop = (getattr(msg, "response_metadata", None) or {}).get("stop_reason")
         return LLMResult(msg.text, model, cost, usage, stop)
+
+    async def _complete_plan(self, model: str, effort: str, max_out: int, est_prompt: int, system: str, user: str,
+                             key: str) -> LLMResult:
+        plan_cfg = self.cfg.get("plan") or {}
+        max_wait = float(plan_cfg.get("max_wait_s", 6 * 3600))
+        poll = float(plan_cfg.get("poll_s", 900))
+        while True:
+            if (delay := self._pause_until - time.time()) > 0:
+                await asyncio.sleep(delay)
+            reservation = self.meter.reserve(model, est_prompt, max_out, key=key)
+            try:
+                reply = await self.plan_caller(model, effort, max_out, system, user)
+            except plan_llm.PlanRateLimited as e:
+                self.meter.release(reservation)
+                now = time.time()
+                until = max(e.resets_at + 30 if e.resets_at else now + poll, now + 60)
+                if until > self._pause_until:
+                    self.paused_s += until - max(self._pause_until, now)
+                    self._pause_until = until
+                if self.paused_s > max_wait:
+                    raise plan_llm.PlanLimitReached(f"{e}; waited {self.paused_s / 3600:.1f}h in total, over plan.max_wait_s")
+                self.log(f"plan limit: {e}; pausing calls until {time.strftime('%H:%M', time.localtime(self._pause_until))}")
+                continue
+            except BaseException:
+                self.meter.release(reservation)
+                raise
+            cost = self.meter.settle(reservation, model, reply.usage, key=key)
+            return LLMResult(reply.text, model, cost, reply.usage, reply.stop_reason)

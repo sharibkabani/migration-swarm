@@ -60,11 +60,12 @@ def run(
     manifest: Optional[Path] = typer.Option(None, help="Take repo settings from a benchmark manifest..."),
     name: Optional[str] = typer.Option(None, help="...entry with this name."),
     run_id: Optional[str] = typer.Option(None),
+    backend: Optional[str] = typer.Option(None, help="LLM backend: 'api' (ANTHROPIC_API_KEY, billed) or 'plan' (Claude Agent SDK on your Claude plan login, not billed)."),
 ) -> None:
     """Start a migration run. Output: a branch in runs/<run-id>/work plus runs/<run-id>/report.{json,md}."""
     _load_dotenv()
     pack = migrations.load(migration)
-    cfg = config_mod.load(config, budget_usd=budget, concurrency=concurrency)
+    cfg = config_mod.load(config, budget_usd=budget, concurrency=concurrency, llm_backend=backend)
     if manifest and name:
         e = _manifest_entry(manifest, name)
         repo_path = repo_path if repo_path != "-" else e["url"]
@@ -77,8 +78,8 @@ def run(
             raise typer.BadParameter("for a remote repo, pass --image/--install/--test/--test-runner/--source-dir")
     spec = RepoSpec(image or spec.image, install or spec.install, test or spec.test, test_runner or spec.test_runner,
                     list(source_dir) if source_dir else spec.source_dirs, list(test_path) if test_path else spec.test_paths)
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        typer.echo("ANTHROPIC_API_KEY is not set (env var or .env).", err=True)
+    if cfg.get("llm_backend", "api") == "api" and not os.environ.get("ANTHROPIC_API_KEY"):
+        typer.echo("ANTHROPIC_API_KEY is not set (env var or .env). Or use --backend plan to run on your Claude plan.", err=True)
         raise typer.Exit(2)
     ctx = runs.create(repo_path, migration, spec, cfg, run_id=run_id, ref=ref)
     typer.echo(f"run id: {ctx.run_id}  (dir: {ctx.run_dir})")
@@ -86,16 +87,20 @@ def run(
 
 
 def _execute(ctx, pack, resume: bool) -> None:
-    ctx.llm = LLM(ctx.cfg, ctx.meter, ctx.run_id, ctx.migration)
+    ctx.llm = LLM(ctx.cfg, ctx.meter, ctx.run_id, ctx.migration, log=ctx.log)
     asyncio.run(graph.execute(ctx, pack, resume=resume))
     typer.echo((ctx.run_dir / "report.md").read_text() if (ctx.run_dir / "report.md").exists() else "no report written")
 
 
 @app.command()
-def resume(run_id: str, budget: Optional[float] = typer.Option(None, help="Raise the budget (USD) before resuming.")) -> None:
-    """Resume a crashed, cancelled or out-of-budget run from its checkpoints."""
+def resume(run_id: str, budget: Optional[float] = typer.Option(None, help="Raise the budget (USD) before resuming."),
+           backend: Optional[str] = typer.Option(None, help="LLM backend: 'api' (ANTHROPIC_API_KEY, billed) or 'plan' (Claude Agent SDK on your Claude plan login, not billed).")) -> None:
+    """Resume a crashed, cancelled, out-of-budget or plan-limited run from its checkpoints."""
     _load_dotenv()
     ctx = runs.load(run_id)
+    if backend:
+        ctx.cfg["llm_backend"] = backend
+        (ctx.run_dir / "config.json").write_text(json.dumps(ctx.cfg, indent=1))
     if budget is not None:
         ctx.cfg["budget_usd"] = budget
         ctx.meter.budget_usd = budget
@@ -150,6 +155,7 @@ def eval_cmd(
     budget: Optional[float] = typer.Option(None, help="USD budget per run (swarm and Claude baselines)."),
     out: Optional[Path] = typer.Option(None, help="Output dir (default evals/<migration>/<date>)."),
     config: Optional[Path] = typer.Option(None),
+    backend: Optional[str] = typer.Option(None, help="LLM backend: 'api' (ANTHROPIC_API_KEY, billed) or 'plan' (Claude Agent SDK on your Claude plan login, not billed)."),
 ) -> None:
     """Run every system on every repo and write one comparison table (markdown + CSV)."""
     from migration_swarm.core import evals
@@ -157,7 +163,7 @@ def eval_cmd(
     _load_dotenv()
     out_dir = evals.run_eval(migration, manifest, [s.strip() for s in systems.split(",")], runs_per_cell=runs,
                              repos=[r.strip() for r in repos.split(",")] if repos else None, budget=budget,
-                             out_dir=out, config=config)
+                             out_dir=out, config=config, backend=backend)
     typer.echo((out_dir / "results.md").read_text())
 
 

@@ -12,6 +12,16 @@ effort:            # output_config.effort per role (Haiku 5.5 / Sonnet 5.5 accep
 max_output_tokens: 32000   # per call; responses stream, so large values are safe
 api_max_retries: 8         # SDK retries 429/5xx/connection errors with exponential backoff
 
+# api:  calls the Anthropic API with ANTHROPIC_API_KEY (billed).
+# plan: calls go through the Claude Agent SDK signed in with your Claude plan (host login or
+#       CLAUDE_CODE_OAUTH_TOKEN). Not billed; draws from the plan's usage limits. Costs and the budget
+#       below are API-equivalent (same price table). On a usage limit, calls pause until the window
+#       resets, for at most plan.max_wait_s in total; then the run stops as `plan_limit` (resumable).
+llm_backend: api
+plan:
+  max_wait_s: 21600
+  poll_s: 900              # wait used when the limit's reset time is unknown
+
 budget_usd: 5.0
 per_file_token_cap: 400000 # input+output tokens across all attempts for one unit
 concurrency: 8

@@ -5,8 +5,8 @@
     (api.anthropic.com, registry.npmjs.org) on port 443 only. Everything else is refused.
   - All capabilities dropped, no-new-privileges, non-root, memory/pid limits, only the run's fresh
     clone mounted read-write, no host env or credentials except the baseline API key passed in.
-  - The key is a separate, spend-limited key (MSW_BASELINE_ANTHROPIC_API_KEY): untrusted test code
-    running in the container can read it.
+  - The credential passed in (a separate, spend-limited API key, or a Claude plan OAuth token from
+    `claude setup-token`) is readable by untrusted test code in the container. Use one you can revoke.
 """
 
 from __future__ import annotations
@@ -62,13 +62,13 @@ def agent_image(base: str) -> str:
     return tag
 
 
-def run_agent(workdir: Path, base_image: str, command: str, *, api_key: str, timeout_s: int,
+def run_agent(workdir: Path, base_image: str, command: str, *, auth_env: dict[str, str], timeout_s: int,
               mounts: list[Mount] | None = None, env: dict[str, str] | None = None) -> sandbox.SandboxResult:
     proxy = ensure_egress()
     proxy_env = {
         "HTTPS_PROXY": proxy, "HTTP_PROXY": proxy, "https_proxy": proxy, "http_proxy": proxy,
         "npm_config_https_proxy": proxy, "npm_config_proxy": proxy, "NO_PROXY": "localhost,127.0.0.1",
-        "ANTHROPIC_API_KEY": api_key, "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        **auth_env, "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "DISABLE_TELEMETRY": "1", **(env or {}),
     }
     return sandbox.run(workdir, agent_image(base_image), command, network=NETWORK, timeout_s=timeout_s,

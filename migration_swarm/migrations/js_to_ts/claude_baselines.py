@@ -5,8 +5,14 @@
                     subagent (mirrors the swarm's cheap-worker / stronger-coordinator split).
 
 Both get the same rules as the swarm's workers and the same self-check the evaluator applies
-(claude/check.py runs the same judge script). Everything runs in Docker; the key used is
-MSW_BASELINE_ANTHROPIC_API_KEY (a separate, spend-limited key), never the engine's key.
+(claude/check.py runs the same judge script). Everything runs in Docker.
+
+Credentials (never the engine's key):
+  llm_backend api   MSW_BASELINE_ANTHROPIC_API_KEY, a separate spend-limited key (`--bare` mode).
+  llm_backend plan  CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`: runs on your Claude plan, not
+                    billed. `--bare` is dropped because bare mode never reads OAuth credentials. When
+                    the plan's usage limit stops the agent, we wait for the window to reset and resume
+                    the same session (`--resume`), up to plan.max_wait_s; that wait is excluded from wall time.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import json
 import os
 import shutil
 import time
+import uuid
 from pathlib import Path
 
 from migration_swarm.core import agent_sandbox
@@ -87,10 +94,63 @@ def _repriced(model_usage: dict, prices: dict) -> float | None:
     return round(total, 6) if ok else None
 
 
-def _run(entry: dict, prep: dict, clone_src: Path, run_dir: Path, cfg: dict, *, subagents: bool) -> SystemOutput:
+def _auth(cfg: dict) -> tuple[dict, list[str]]:
+    if cfg.get("llm_backend") == "plan":
+        tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        if not tok:
+            raise RuntimeError("llm_backend plan: set CLAUDE_CODE_OAUTH_TOKEN in .env (create it with `claude setup-token`)")
+        return {"CLAUDE_CODE_OAUTH_TOKEN": tok}, []
     key = os.environ.get("MSW_BASELINE_ANTHROPIC_API_KEY")
     if not key:
-        raise RuntimeError("MSW_BASELINE_ANTHROPIC_API_KEY is not set (separate, spend-limited key for the Claude Code baselines)")
+        raise RuntimeError("MSW_BASELINE_ANTHROPIC_API_KEY is not set (separate, spend-limited key for the Claude Code "
+                           "baselines), or run with --backend plan")
+    return {"ANTHROPIC_API_KEY": key}, ["--bare"]
+
+
+LIMIT_WORDS = ("usage limit", "rate limit", "hit your limit", "limit reached")
+
+
+def _parse_stream(output: str) -> tuple[dict | None, dict | None]:
+    """Last result message and last rejected rate-limit info from `--output-format stream-json` output."""
+    result = rejected = None
+    for line in output.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            m = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if m.get("type") == "result":
+            result = m
+        elif m.get("type") == "rate_limit_event" and (m.get("rate_limit_info") or {}).get("status") == "rejected":
+            rejected = m["rate_limit_info"]
+    return result, rejected
+
+
+def _limited(result: dict, rejected: dict | None) -> bool:
+    if not result.get("is_error"):
+        return False
+    text = (str(result.get("result") or "") + " ".join(result.get("errors") or [])).lower()
+    return rejected is not None or result.get("api_error_status") == 429 or any(w in text for w in LIMIT_WORDS)
+
+
+def _sum_usage(results: list[dict]) -> tuple[dict, dict]:
+    usage: dict = {}
+    model_usage: dict = {}
+    for r in results:
+        for k, v in (r.get("usage") or {}).items():
+            if isinstance(v, (int, float)):
+                usage[k] = usage.get(k, 0) + v
+        for m, mu in (r.get("modelUsage") or {}).items():
+            acc = model_usage.setdefault(m, {})
+            for k, v in mu.items():
+                if isinstance(v, (int, float)):
+                    acc[k] = acc.get(k, 0) + v
+    return usage, model_usage
+
+
+def _run(entry: dict, prep: dict, clone_src: Path, run_dir: Path, cfg: dict, *, subagents: bool) -> SystemOutput:
+    auth_env, auth_flags = _auth(cfg)
     tree = baselines.fresh_tree(entry, prep, clone_src, run_dir / "tree")
     bundle = run_dir / "msw-run"
     _check_bundle(entry, prep, cfg, bundle)
@@ -100,9 +160,12 @@ def _run(entry: dict, prep: dict, clone_src: Path, run_dir: Path, cfg: dict, *, 
                        as_cast=b["as_cast"], nn=b["non_null_assertion"], module_rules=MODULE_RULES[prep["module_style"]],
                        test=entry["test"], baseline=prep["baseline"]["passed"], budget=cfg["budget_usd"])
     model = cfg["models"]["escalation"].split(":", 1)[-1]
-    flags = ["--bare", "--output-format", "json", "--model", model, "--max-budget-usd", str(cfg["budget_usd"]),
+    flags = [*auth_flags, "--output-format", "stream-json", "--verbose", "--model", model,
              "--permission-mode", "bypassPermissions"]
-    mounts = [Mount(bundle, "/opt/msw-run")]
+    # Claude Code's own state (sessions) lives in a per-run dir so a plan-limited run can be resumed.
+    claude_home = run_dir / "claude-config"
+    claude_home.mkdir(parents=True, exist_ok=True)
+    mounts = [Mount(bundle, "/opt/msw-run"), Mount(claude_home, "/opt/msw-claude", read_only=False)]
     if subagents:
         task += SUBAGENT_ADDENDUM
         agents = {"ts-file-migrator": {
@@ -112,30 +175,57 @@ def _run(entry: dict, prep: dict, clone_src: Path, run_dir: Path, cfg: dict, *, 
         mounts.append(Mount(HERE / "skill", "/opt/msw-skill"))
         flags += ["--agents", "/opt/msw-run/agents.json", "--add-dir", "/opt/msw-skill"]
     (bundle / "prompt.txt").write_text(task)
-    cmd = "cd /work && claude -p \"$(cat /opt/msw-run/prompt.txt)\" " + " ".join(flags)
+    (bundle / "continue.txt").write_text("You were paused by a usage limit. Continue the task where you left off.")
+    plan_cfg = cfg.get("plan") or {}
+    max_wait, poll = float(plan_cfg.get("max_wait_s", 6 * 3600)), float(plan_cfg.get("poll_s", 900))
+    session_id = str(uuid.uuid4())
+    results: list[dict] = []
+    waited = 0.0
+    log = []
     start = time.monotonic()
-    res = agent_sandbox.run_agent(tree, entry["image"], cmd, api_key=key, timeout_s=int(cfg.get("baseline_timeout_s", 7200)),
-                                  mounts=mounts)
-    wall = time.monotonic() - start
-    (run_dir / "claude.log").write_text(res.output)
-    result = None
-    for line in reversed(res.output.splitlines()):
-        if line.startswith("{") and '"type":"result"' in line.replace(" ", ""):
-            result = json.loads(line)
+    while True:
+        spent = sum(r.get("total_cost_usd") or 0 for r in results)
+        remaining = max(cfg["budget_usd"] - spent, 0.01)
+        head = (f"claude -p \"$(cat /opt/msw-run/prompt.txt)\" --session-id {session_id}" if not results else
+                f"claude -p \"$(cat /opt/msw-run/continue.txt)\" --resume {session_id}")
+        cmd = f"cd /work && {head} {' '.join(flags)} --max-budget-usd {remaining:.2f}"
+        res = agent_sandbox.run_agent(tree, entry["image"], cmd, auth_env=auth_env,
+                                      timeout_s=int(cfg.get("baseline_timeout_s", 7200)), mounts=mounts,
+                                      env={"CLAUDE_CONFIG_DIR": "/opt/msw-claude"})
+        log.append(res.output)
+        result, rejected = _parse_stream(res.output)
+        if result is None:
             break
-    if result is None:
+        results.append(result)
+        if cfg.get("llm_backend") != "plan" or not _limited(result, rejected):
+            break
+        resets = (rejected or {}).get("resetsAt")
+        wait = max((resets + 30 - time.time()) if resets else poll, 60)
+        if waited + wait > max_wait:
+            break
+        time.sleep(wait)
+        waited += wait
+    wall = time.monotonic() - start - waited
+    (run_dir / "claude.log").write_text("\n\n===== resumed =====\n\n".join(log))
+    if not results:
         return SystemOutput(tree, wall, None, None, {"exit_code": res.exit_code}, error=f"no result JSON (exit {res.exit_code})")
-    u = result.get("usage", {})
-    extra = {"num_turns": result.get("num_turns"), "terminal_reason": result.get("terminal_reason"),
-             "is_error": result.get("is_error"), "claude_reported_cost_usd": result.get("total_cost_usd"),
-             "repriced_cost_usd": _repriced(result.get("modelUsage"), cfg["prices"]),
-             "subagents_spawned": (result.get("subagent_stats") or {}).get("spawned"),
-             "subagents_completed": (result.get("subagent_stats") or {}).get("completed")}
-    (run_dir / "claude_result.json").write_text(json.dumps(result, indent=1))
-    return SystemOutput(tree, wall, result.get("total_cost_usd"),
-                        {"input": u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0),
-                         "output": u.get("output_tokens", 0)}, extra,
-                        error=f"claude error: {result.get('terminal_reason')}" if result.get("is_error") else None)
+    last = results[-1]
+    usage, model_usage = _sum_usage(results)
+    extra = {"num_turns": sum(r.get("num_turns") or 0 for r in results), "terminal_reason": last.get("terminal_reason"),
+             "is_error": last.get("is_error"), "claude_reported_cost_usd": round(sum(r.get("total_cost_usd") or 0 for r in results), 6),
+             "repriced_cost_usd": _repriced(model_usage, cfg["prices"]),
+             "subagents_spawned": sum((r.get("subagent_stats") or {}).get("spawned") or 0 for r in results),
+             "subagents_completed": sum((r.get("subagent_stats") or {}).get("completed") or 0 for r in results),
+             "plan_limit_wait_s": round(waited, 1), "sessions": len(results)}
+    (run_dir / "claude_result.json").write_text(json.dumps(results, indent=1))
+    error = None
+    if last.get("is_error"):
+        error = ("plan usage limit (gave up waiting)" if _limited(last, None) else
+                 f"claude error: {last.get('terminal_reason') or last.get('subtype')}")
+    return SystemOutput(tree, wall, extra["claude_reported_cost_usd"],
+                        {"input": usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                         + usage.get("cache_creation_input_tokens", 0), "output": usage.get("output_tokens", 0)},
+                        extra, error=error)
 
 
 def run_single(entry, prep, clone_src, run_dir, cfg) -> SystemOutput:

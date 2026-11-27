@@ -47,16 +47,18 @@ def swarm_system(concurrency: int):
         spec = pack.evaluate.spec_from_entry(entry)
         ctx = runs.create(str(clone_src), pack.NAME, spec, c, run_id="swarm", ref=entry["pre_migration_sha"],
                           base=run_dir)
-        ctx.llm = LLM(c, ctx.meter, ctx.run_id, ctx.migration)
+        ctx.llm = LLM(c, ctx.meter, ctx.run_id, ctx.migration, log=ctx.log)
         start = time.monotonic()
         asyncio.run(graph.execute(ctx, pack))
         rep = json.loads((ctx.run_dir / "report.json").read_text())
-        return SystemOutput(final_tree=ctx.workdir, wall_s=time.monotonic() - start, cost_usd=rep["cost"]["spent_usd"],
+        # wall time excludes time spent paused on Claude plan usage limits (reported separately)
+        return SystemOutput(final_tree=ctx.workdir, wall_s=time.monotonic() - start - ctx.llm.paused_s, cost_usd=rep["cost"]["spent_usd"],
                             tokens=rep["cost"]["tokens"],
                             extra={"stop_reason": rep["stop_reason"], "files_by_status": rep["result"]["files_by_status"],
                                    "retries_per_unit": rep["result"]["retries_per_unit"],
                                    "escalation_rate": rep["result"]["escalation_rate"],
-                                   "degraded_files": rep["result"]["degraded_files"]})
+                                   "degraded_files": rep["result"]["degraded_files"],
+                                   "plan_limit_wait_s": round(ctx.llm.paused_s, 1)})
     return run
 
 
@@ -118,11 +120,12 @@ def render_md(migration: str, aggs: list[dict], pack, meta: dict) -> str:
 
 
 def run_eval(migration: str, manifest: Path, systems: list[str], *, runs_per_cell: int = 3, repos: list[str] | None = None,
-             budget: float | None = None, out_dir: Path | None = None, config: Path | None = None) -> Path:
+             budget: float | None = None, out_dir: Path | None = None, config: Path | None = None,
+             backend: str | None = None) -> Path:
     from migration_swarm import migrations as migrations_mod
 
     pack = migrations_mod.load(migration)
-    cfg = config_mod.load(config, budget_usd=budget)
+    cfg = config_mod.load(config, budget_usd=budget, llm_backend=backend)
     entries = [e for e in yaml.safe_load(manifest.read_text())["repos"] if not repos or e["name"] in repos]
     all_systems = systems_for(pack)
     if systems == ["all"]:
@@ -138,7 +141,8 @@ def run_eval(migration: str, manifest: Path, systems: list[str], *, runs_per_cel
     rows = [json.loads(l) for l in rows_path.read_text().splitlines()] if rows_path.exists() else []
     done = {(r["system"], r["repo"], r["run"]) for r in rows}
     meta = {"date": date, "systems": systems, "repos": [e["name"] for e in entries], "runs": runs_per_cell,
-            "budget": cfg["budget_usd"], "manifest": str(manifest)}
+            "budget": cfg["budget_usd"], "manifest": str(manifest),
+            "llm_backend": cfg.get("llm_backend", "api")}
 
     for e in entries:
         clone_src = ROOT / ".bench_cache" / "clones" / e["name"]

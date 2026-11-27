@@ -60,6 +60,8 @@ def build(ctx: RunContext, pack, state: dict) -> dict:
         "stop_reason": state.get("stop_reason"),
         "complete": not state.get("stop_reason"),
         "wall_clock_s": round(wall, 1) if wall else None,
+        "llm_backend": ctx.cfg.get("llm_backend", "api"),
+        "plan_limit_wait_s": round(getattr(ctx.llm, "paused_s", 0.0), 1),
         "repo": {"files": len(a.get("files", [])), "loc": a.get("total_loc", 0), "cycles": a.get("cycles", []),
                  "units": len(units), "layers": len(state.get("layers") or [])},
         "setup": {k: v for k, v in (state.get("setup") or {}).items() if k not in ("protected",)},
@@ -90,7 +92,10 @@ def render_md(r: dict) -> str:
         f"- Repo: {r['repo']['files']} files, {r['repo']['loc']} LOC, {r['repo']['units']} units in {r['repo']['layers']} layers, "
         f"{len(r['repo']['cycles'])} import cycles",
         f"- Cost: **${cost['spent_usd']:.4f}** of ${cost['budget_usd']:.2f} budget  ·  {cost['calls']} LLM calls  ·  "
-        f"${cost['usd_per_kloc']:.4f}/kLOC  ·  wall clock {r['wall_clock_s']}s",
+        f"${cost['usd_per_kloc']:.4f}/kLOC  ·  wall clock {r['wall_clock_s']}s"
+        + (f" (incl. {r['plan_limit_wait_s']}s waiting for plan limits)" if r.get("plan_limit_wait_s") else ""),
+        *([f"- Backend: Claude plan via the Agent SDK. Nothing was billed; costs are API-equivalent."]
+          if r.get("llm_backend") == "plan" else []),
         "",
         "## Files",
         "",

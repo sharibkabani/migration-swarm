@@ -23,6 +23,7 @@ from langgraph.types import Send
 
 from migration_swarm.core import planner, report as report_mod, runs
 from migration_swarm.core.budget import BudgetExceeded, TokenCapExceeded
+from migration_swarm.core.plan_llm import PlanLimitReached
 from migration_swarm.core.context import RunContext
 
 RESET = {"__reset__": True}
@@ -145,7 +146,8 @@ def build(ctx: RunContext, pack) -> StateGraph:
                                        expected_output_chars=size or None)
         except BudgetExceeded as e:
             ctx.log(f"budget: {e}")
-            return {"candidates": {uid: {"error": "budget"}}, "stop_reason": "budget"}
+            why = "plan_limit" if isinstance(e, PlanLimitReached) else "budget"
+            return {"candidates": {uid: {"error": why}}, "stop_reason": why}
         except TokenCapExceeded as e:
             return {"candidates": {uid: {"error": "token_cap", "detail": str(e)}}}
         except Exception as e:  # API failure after SDK retries: count as a failed attempt, keep going
@@ -228,7 +230,8 @@ def build(ctx: RunContext, pack) -> StateGraph:
                     r = await ctx.llm.complete("steward", system, user, key="__steward__")
                 except BudgetExceeded as e:
                     ctx.log(f"budget: {e}")
-                    return {"stop_reason": "budget", "steward_requests": [RESET]}
+                    return {"stop_reason": "plan_limit" if isinstance(e, PlanLimitReached) else "budget",
+                            "steward_requests": [RESET]}
                 reasons = await asyncio.to_thread(pack.apply_steward, ctx, state["setup"], r.text)
                 log.append({"layer": state["layer_idx"], "attempt": attempt, "requests": len(reqs), "rejected": reasons})
                 if not reasons:
@@ -278,7 +281,7 @@ def build(ctx: RunContext, pack) -> StateGraph:
     return g
 
 
-RESUMABLE_STOPS = ("cancelled", "budget")
+RESUMABLE_STOPS = ("cancelled", "budget", "plan_limit")
 
 
 async def execute(ctx: RunContext, pack, *, resume: bool = False) -> dict:
