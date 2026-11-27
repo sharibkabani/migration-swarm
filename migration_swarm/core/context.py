@@ -32,6 +32,8 @@ class RunContext:
     cfg: dict
     meter: CostMeter
     llm: object = None               # core.llm.LLM (injected; mocked in tests)
+    events: object = None            # core.events.EventBus (created on first use)
+    quiet: bool = False              # don't print log lines (a live view is showing them)
 
     @property
     def scratch(self) -> Path:
@@ -39,11 +41,22 @@ class RunContext:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    def bus(self):
+        if self.events is None:
+            from migration_swarm.core.events import EventBus
+            self.events = EventBus(self.run_dir / "events.jsonl")
+        return self.events
+
+    def emit(self, kind: str, **data) -> None:
+        self.bus().emit(kind, **data)
+
     def log(self, msg: str) -> None:
         line = f"{dt.datetime.now().strftime('%H:%M:%S')} {msg}"
-        print(line, flush=True)
+        if not self.quiet:
+            print(line, flush=True)
         with (self.run_dir / "run.log").open("a") as f:
             f.write(line + "\n")
+        self.emit("log", msg=msg)
 
     def git(self, *args: str, check: bool = True) -> str:
         return subprocess.run(["git", *args], cwd=self.workdir, check=check, capture_output=True, text=True).stdout.strip()

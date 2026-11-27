@@ -68,20 +68,30 @@ def disable_api_key() -> None:
         os.environ.pop(k, None)
 
 
-async def plan_call(model: str, effort: str, max_tokens: int, system: str, user: str) -> PlanReply:
-    from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, RateLimitEvent, ResultMessage, TextBlock,
-                                  query)
+async def plan_call(model: str, effort: str, max_tokens: int, system: str, user: str, on_text=None) -> PlanReply:
+    from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, RateLimitEvent, ResultMessage, StreamEvent,
+                                  TextBlock, query)
 
     opts = ClaudeAgentOptions(
         tools=[], system_prompt=system, model=model.split(":", 1)[-1], max_turns=1, effort=effort,
         setting_sources=[], cwd=_cwd(), extra_args={"no-session-persistence": None},
+        include_partial_messages=on_text is not None,
         env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(max_tokens), "DISABLE_AUTOUPDATER": "1",
              "DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
     texts: list[str] = []
     rejected = None
     result = None
+    streamed: list[str] = []
+    last = 0.0
     async for m in query(prompt=user, options=opts):
-        if isinstance(m, AssistantMessage):
+        if isinstance(m, StreamEvent):
+            d = m.event.get("delta") or {}
+            if m.event.get("type") == "content_block_delta" and d.get("type") == "text_delta":
+                streamed.append(d.get("text", ""))
+                if on_text and time.monotonic() - last > 0.4:
+                    last = time.monotonic()
+                    on_text("".join(streamed))
+        elif isinstance(m, AssistantMessage):
             texts += [b.text for b in m.content if isinstance(b, TextBlock)]
         elif isinstance(m, RateLimitEvent) and m.rate_limit_info.status == "rejected":
             rejected = m.rate_limit_info

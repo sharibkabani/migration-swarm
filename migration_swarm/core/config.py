@@ -20,4 +20,10 @@ def load(path: Path | None = None, **overrides: Any) -> dict:
     cfg = yaml.safe_load(DEFAULT.read_text())
     if path:
         cfg = _merge(cfg, yaml.safe_load(Path(path).read_text()) or {})
-    return _merge(cfg, {k: v for k, v in overrides.items() if v is not None})
+    cfg = _merge(cfg, {k: v for k, v in overrides.items() if v is not None})
+    provider = cfg.get("provider", "claude")
+    if provider not in cfg["provider_models"]:
+        raise ValueError(f"unknown provider {provider!r}; choose one of {', '.join(cfg['provider_models'])}")
+    # explicit `models` entries (from a --config file or override) win over the provider's defaults
+    cfg["models"] = {**cfg["provider_models"][provider], **(cfg.get("models") or {})}
+    return cfg

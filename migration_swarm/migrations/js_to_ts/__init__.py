@@ -11,6 +11,9 @@ from migration_swarm.migrations.js_to_ts import setup_step as setup_mod
 
 NAME = "js-to-ts"
 DESCRIPTION = "JavaScript -> strict TypeScript (in place, file by file, tests unchanged)"
+INTENT_HINT = ("Converts a Node/JS repo's JavaScript source files (CommonJS or ESM) to .ts with real types under "
+               "`strict: true`, no `any`/@ts-ignore, runtime behaviour unchanged, test files untouched. Covers "
+               "requests like 'convert to TypeScript', 'add types', 'migrate src/ to TS'. Needs package.json and a test suite.")
 ESCAPE_KEYS = ["explicit_any", "implicit_any", "ts_ignore", "ts_expect_error", "ts_nocheck", "as_unknown_as",
                "non_null_assertion", "as_cast", "runtime_removed_tokens", "runtime_added_tokens"]
 
@@ -25,10 +28,20 @@ def detect_repo_spec(repo: Path, source_dirs: list[str] | None = None) -> RepoSp
     install = ("yarn install --frozen-lockfile" if (repo / "yarn.lock").exists()
                else "npm ci" if (repo / "package-lock.json").exists() else "npm install")
     dev = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
-    runner = next((r for r in ("jest", "mocha", "jasmine") if r in dev), "other")
+    script = (pkg.get("scripts") or {}).get("test", "")
+    runner = ("node-test" if "node --test" in script else
+              next((r for r in ("jest", "mocha", "jasmine") if r in script), None) or
+              next((r for r in ("jest", "mocha", "jasmine") if r in dev), "other"))
     dirs = source_dirs or [d for d in ("src", "lib") if (repo / d).is_dir()][:1] or ["."]
+    # Protected (read-only, hashed) test files: common test dirs and test config, on top of the
+    # test-file name pattern the setup step always protects.
+    tests = [f"{d}/**" for d in ("test", "tests", "__tests__", "spec") if (repo / d).is_dir()]
+    tests += [f for f in ("jest.config.js", "jest.config.cjs", "jest.config.mjs", ".mocharc.js", ".mocharc.json",
+                          ".mocharc.yml", "jasmine.json") if (repo / f).exists()]
+    if "jest" in pkg:
+        tests.append("package.json#jest")
     return RepoSpec(image=f"node:{node}-bookworm", install=install, test="npm test", test_runner=runner,
-                    source_dirs=dirs, test_paths=[])
+                    source_dirs=dirs, test_paths=tests)
 
 
 def analyze(ctx: RunContext) -> dict:

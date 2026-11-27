@@ -12,7 +12,11 @@ from pathlib import Path
 from migration_swarm.core.budget import CostMeter
 from migration_swarm.core.context import RepoSpec, RunContext
 
-RUNS_DIR = Path(os.environ.get("MSW_RUNS_DIR", Path(__file__).resolve().parents[2] / "runs"))
+_CHECKOUT = Path(__file__).resolve().parents[2]
+HOME_DIR = Path(os.environ.get("MSW_HOME", Path.home() / ".migration-swarm"))
+# A source checkout keeps runs next to the code; an installed package keeps them in ~/.migration-swarm/runs.
+RUNS_DIR = Path(os.environ.get("MSW_RUNS_DIR") or (_CHECKOUT / "runs" if (_CHECKOUT / "pyproject.toml").exists()
+                                                    else HOME_DIR / "runs"))
 
 
 def new_run_id() -> str:

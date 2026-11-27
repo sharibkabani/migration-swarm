@@ -244,3 +244,25 @@ from plan limits when signed in with a plan. Direct Messages API calls are not c
     noisier than on the API.
   - No LangSmith tracing on this path.
   - Runs share the plan's limits with your own interactive Claude use.
+
+## 7. Interactive mode and providers (added 2026-11-27)
+
+- **Install:** `uv tool install git+…` or `pip install`. Running `migration-swarm` with no
+  command starts `migration_swarm/tui.py` (Rich + questionary).
+- **Flow:** provider → auth → repo → free-text request → plan screen → live dashboard → summary.
+- **Request routing:** `core/intent.py` asks the planner model only to *route* the request to a
+  supported pack and extract options (source dirs, budget). Unsupported requests are refused with
+  the reason. Everything after routing is the pack's deterministic pipeline.
+- **Plan approval:**
+  - The graph is compiled with `interrupt_before=["setup"]`. The run analyzes and plans, then
+    pauses with nothing spent; it continues only on approval.
+  - A declined run can still be resumed later with `resume`.
+- **Live view:** `core/events.py`. Nodes and the LLM layer emit events (phase, layer, agent
+  start/progress/done, judge steps, test runs, verdicts, steward, plan waits). Streaming output
+  feeds `agent_progress`. Events go to listeners and to `runs/<id>/events.jsonl`, except
+  progress events.
+- **Providers:** `core/providers.py`, with model ids `anthropic:` / `google_genai:` / `openai:`.
+  `config.provider` picks a profile from `provider_models`, and explicit `models` entries win.
+  Prompt caching markers are only sent to Anthropic.
+- **Unverified:** Gemini and OpenAI are wired and construct correctly but haven't been run on a
+  benchmark yet.

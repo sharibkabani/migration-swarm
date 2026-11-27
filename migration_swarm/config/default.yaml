@@ -1,10 +1,24 @@
 # migration-swarm defaults. Override with `--config my.yaml` (deep-merged over this file).
-models:
-  worker: anthropic:claude-haiku-5-5
-  escalation: anthropic:claude-sonnet-5-5
-  steward: anthropic:claude-sonnet-5-5
-  planner: anthropic:claude-sonnet-5-5
-effort:            # output_config.effort per role (Haiku 5.5 / Sonnet 5.5 accept low..max)
+# Which provider's models to use: claude | gemini | openai. `models` is filled from provider_models
+# unless you set `models` yourself in a --config file.
+provider: claude
+provider_models:
+  claude:   # cheap worker, stronger escalation/steward/planner
+    worker: anthropic:claude-haiku-5-5
+    escalation: anthropic:claude-sonnet-5-5
+    steward: anthropic:claude-sonnet-5-5
+    planner: anthropic:claude-sonnet-5-5
+  gemini:   # GOOGLE_API_KEY or GEMINI_API_KEY. gemini-3.8-flash has a free tier; gemini-4-carbon does not.
+    worker: google_genai:gemini-3.8-flash
+    escalation: google_genai:gemini-4-carbon
+    steward: google_genai:gemini-4-carbon
+    planner: google_genai:gemini-4-carbon
+  openai:   # OPENAI_API_KEY
+    worker: openai:gpt-6-luna
+    escalation: openai:gpt-6.2-sol
+    steward: openai:gpt-6.2-sol
+    planner: openai:gpt-6.2-sol
+effort:            # per role: Claude output_config.effort, OpenAI reasoning_effort, Gemini thinking_level
   worker: medium
   escalation: medium
   steward: medium
@@ -44,6 +58,28 @@ prices:
     cache_write_5m: 2.50
     cache_write_1h: 4.00
     cache_read: 0.10
+  # Gemini, from https://aistudio.google.com/docs/pricing (read 2026-11-27). Prices that the page says
+  # rise soon are entered at the higher rate so budgets stay conservative:
+  # gemini-4-carbon doubles on 2026-12-01, gemini-3.8-flash doubles on 2027-01-01.
+  gemini-4-carbon:
+    input: 4.00
+    output: 20.00
+    cache_read: 0.20
+  gemini-3.8-flash:
+    input: 1.50
+    output: 7.50
+    cache_read: 0.15
+  # OpenAI, from https://developers.openai.com/api/docs/pricing (read 2026-11-27); long context = >272K input.
+  gpt-6.2-sol:
+    input: 2.00
+    output: 10.00
+    cache_read: 0.10
+    long_context: {over_prompt_tokens: 272000, input: 4.00, output: 15.00, cache_read: 0.20}
+  gpt-6-luna:
+    input: 0.10
+    output: 0.50
+    cache_read: 0.01
+    long_context: {over_prompt_tokens: 272000, input: 0.20, output: 0.75, cache_read: 0.02}
 
 # Per-file escape budgets (pack-defined keys; the core only compares counts to these numbers).
 escape_budgets:

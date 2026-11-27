@@ -55,8 +55,10 @@ def price_usage(prices: dict, model: str, u: Usage) -> float:
     lc = p.get("long_context")
     if lc and u.prompt_tokens > lc["over_prompt_tokens"]:
         p = {**p, **lc}
-    return (u.input_tokens * p["input"] + u.output_tokens * p["output"] + u.cache_read * p["cache_read"]
-            + u.cache_write_5m * p["cache_write_5m"] + u.cache_write_1h * p["cache_write_1h"]) / 1_000_000
+    # providers without explicit cache-write pricing (OpenAI, Gemini implicit caching) bill writes as input
+    return (u.input_tokens * p["input"] + u.output_tokens * p["output"] + u.cache_read * p.get("cache_read", p["input"])
+            + u.cache_write_5m * p.get("cache_write_5m", p["input"])
+            + u.cache_write_1h * p.get("cache_write_1h", p["input"])) / 1_000_000
 
 
 @dataclass

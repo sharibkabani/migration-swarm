@@ -85,6 +85,7 @@ def build(ctx: RunContext, pack) -> StateGraph:
     # ---- nodes ---------------------------------------------------------------------------
     def analyze_node(state: RunState) -> dict:
         status(phase="analyze")
+        ctx.emit("phase", phase="analyze", detail="installing dependencies and mapping imports")
         ctx.log("analyze")
         a = pack.analyze(ctx)
         ctx.log(f"analyze: {len(a['files'])} files, {a['total_loc']} LOC, {len(a['cycles'])} cycles")
@@ -100,20 +101,24 @@ def build(ctx: RunContext, pack) -> StateGraph:
         (ctx.run_dir / "plan.json").write_text(json.dumps({"layers": [[u.id for u in l] for l in layers],
                                                            "unit_files": unit_files}, indent=1))
         status(phase="plan", layers=len(layers), units=len(unit_files))
+        ctx.emit("phase", phase="plan", detail=f"{len(unit_files)} units in {len(layers)} layers")
         return {"layers": [[u.id for u in l] for l in layers], "unit_files": unit_files, "units": units, "layer_idx": 0}
 
     def setup_node(state: RunState) -> dict:
         status(phase="setup")
+        ctx.emit("phase", phase="setup", detail="tsconfig, types, baseline tests")
         try:
             info = pack.setup(ctx)
         except Exception as e:  # setup failure: stop before spending anything
             ctx.log(f"setup failed: {e}")
+            ctx.emit("phase", phase="setup_failed", detail=str(e)[:300])
             return {"setup": {"error": str(e)}, "stop_reason": "setup_failed"}
         return {"setup": info}
 
     def dispatch_node(state: RunState) -> dict:
         k = state["layer_idx"]
         status(phase="migrate", layer=k, layer_count=len(state["layers"]))
+        ctx.emit("layer", index=k, count=len(state["layers"]), units=len(state["layers"][k]))
         return {"candidates": RESET}
 
     def fan_out(state: RunState):
@@ -140,6 +145,8 @@ def build(ctx: RunContext, pack) -> StateGraph:
         role = "worker" if payload["model_role"] == "worker" else "escalation"
         system, user = await asyncio.to_thread(pack.worker_prompt, ctx, payload["setup"], files, payload["retry"],
                                                payload["degraded"])
+        ctx.emit("agent_start", agent=uid, role=role, unit=uid, files=files, model=ctx.llm.model_for(payload["model_role"]),
+                 attempt=payload["attempt"], degraded=payload["degraded"])
         try:
             size = sum((ctx.workdir / f).stat().st_size for f in files if (ctx.workdir / f).exists())
             r = await ctx.llm.complete(role, system, user, key=uid, model_role=payload["model_role"],
@@ -147,16 +154,21 @@ def build(ctx: RunContext, pack) -> StateGraph:
         except BudgetExceeded as e:
             ctx.log(f"budget: {e}")
             why = "plan_limit" if isinstance(e, PlanLimitReached) else "budget"
+            ctx.emit("agent_done", agent=uid, unit=uid, error=why)
             return {"candidates": {uid: {"error": why}}, "stop_reason": why}
         except TokenCapExceeded as e:
+            ctx.emit("agent_done", agent=uid, unit=uid, error="token cap")
             return {"candidates": {uid: {"error": "token_cap", "detail": str(e)}}}
         except Exception as e:  # API failure after SDK retries: count as a failed attempt, keep going
             ctx.log(f"worker {uid}: LLM error {type(e).__name__}: {e}")
+            ctx.emit("agent_done", agent=uid, unit=uid, error=f"{type(e).__name__}: {e}"[:200])
             return {"candidates": {uid: {"error": "llm_error", "detail": f"{type(e).__name__}: {e}"[:500],
                                          "attempt": payload["attempt"]}}}
         out_files, requests, problems = pack.parse_worker_output(r.text, files)
         if r.stop_reason == "max_tokens":
             problems.append("the reply was cut off at the output token limit")
+        ctx.emit("agent_done", agent=uid, unit=uid, cost_usd=r.cost_usd, stop_reason=r.stop_reason,
+                 tokens=r.usage.prompt_tokens + r.usage.output_tokens, problems=problems[:2])
         runs.write_status(ctx)
         return {"candidates": {uid: {"files": out_files, "problems": problems, "requests": requests,
                                      "model": r.model, "cost": r.cost_usd, "attempt": payload["attempt"],
@@ -187,6 +199,13 @@ def build(ctx: RunContext, pack) -> StateGraph:
                 continue
             to_judge[uid] = c
         accepted_units = [uid for uid, u in units.items() if u["status"] in ("accepted", "degraded")]
+        for uid, u in units.items():
+            if uid in cands and uid not in to_judge and u["history"] and cands[uid].get("error") not in ("budget", "cancelled", "plan_limit"):
+                ctx.emit("verdict", unit=uid, files=state["unit_files"][uid],
+                         status="failed" if u["status"] == "failed" else "rejected",
+                         attempt=u["attempts"], reasons=u["history"][-1]["reasons"][:3])
+        if to_judge:
+            ctx.emit("judge_start", layer=k, units=sorted(to_judge))
         verdicts = pack.judge(ctx, state["setup"], state["unit_files"], to_judge, accepted_units, k) if to_judge else {}
         for uid, v in verdicts.items():
             c, u = to_judge[uid], units[uid]
@@ -200,11 +219,15 @@ def build(ctx: RunContext, pack) -> StateGraph:
                 u["escapes"] = v["escapes"]
                 u["model"] = c["model"]
                 requests += [{**r, "from": uid} for r in c.get("requests", [])]
+            ctx.emit("verdict", unit=uid, files=state["unit_files"][uid], attempt=u["attempts"],
+                     status=u["status"] if v["accepted"] else "rejected", reasons=reasons[:3])
         for uid in state["layers"][k]:
             u = units[uid]
             if u["status"] == "pending" and ladder(u["attempts"], n_retries) is None:
                 u["status"] = "failed"
                 ctx.log(f"unit {uid}: failed after {u['attempts']} attempts; left as JavaScript")
+                ctx.emit("verdict", unit=uid, files=state["unit_files"][uid], status="failed", attempt=u["attempts"],
+                         reasons=(u["history"][-1]["reasons"] if u["history"] else [])[:3])
         done = sum(1 for u in units.values() if u["status"] != "pending")
         status(phase="migrate", layer=k, units_done=done,
                units_by_status={s: sum(1 for u in units.values() if u["status"] == s)
@@ -224,6 +247,8 @@ def build(ctx: RunContext, pack) -> StateGraph:
         log: list = []
         if reqs and not state.get("stop_reason"):
             reasons = None
+            ctx.emit("agent_start", agent="__steward__", role="steward", unit="shared types", files=[],
+                     model=ctx.llm.model_for("steward"), attempt=0, degraded=False)
             for attempt in range(2):
                 system, user = pack.steward_prompt(ctx, state["setup"], reqs, reasons)
                 try:
@@ -239,6 +264,8 @@ def build(ctx: RunContext, pack) -> StateGraph:
                     break
             else:
                 ctx.log(f"steward: gave up on {len(reqs)} requests: {reasons[:3]}")
+            ctx.emit("agent_done", agent="__steward__", unit="shared types", error=None if not reasons else "rejected")
+            ctx.emit("steward", requests=len(reqs), rejected=(reasons or [])[:3])
         return {"steward_requests": [RESET], "steward_log": log, "layer_idx": state["layer_idx"] + 1}
 
     def after_steward(state: RunState) -> str:
@@ -251,11 +278,13 @@ def build(ctx: RunContext, pack) -> StateGraph:
         if state.get("stop_reason") == "setup_failed":
             return {"final": {"skipped": "setup failed"}}
         ctx.log("finalize")
+        ctx.emit("phase", phase="finalize", detail="full type-check and test run, commit to branch")
         return {"final": pack.finalize(ctx, state["setup"])}
 
     def report_node(state: RunState) -> dict:
         report_mod.write(ctx, pack, state)
         status(phase="done", stop_reason=state.get("stop_reason"))
+        ctx.emit("phase", phase="done", detail=state.get("stop_reason") or "complete")
         return {}
 
     g = StateGraph(RunState)
@@ -284,17 +313,27 @@ def build(ctx: RunContext, pack) -> StateGraph:
 RESUMABLE_STOPS = ("cancelled", "budget", "plan_limit")
 
 
-async def execute(ctx: RunContext, pack, *, resume: bool = False) -> dict:
+async def execute(ctx: RunContext, pack, *, resume: bool = False, approve=None) -> dict:
     """Run, or resume. Resume after a crash continues from the last checkpoint. Resume after a clean
     stop (cancel / budget) rewinds to the last checkpoint before the stop and continues from there."""
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     async with AsyncSqliteSaver.from_conn_string(str(ctx.run_dir / "checkpoints.sqlite")) as saver:
-        app = build(ctx, pack).compile(checkpointer=saver)
+        # approve: async callable(state values after planning) -> bool. The run pauses before setup
+        # (nothing spent yet) and continues only if it returns True.
+        app = build(ctx, pack).compile(checkpointer=saver, interrupt_before=["setup"] if approve else None)
         config = {"configurable": {"thread_id": ctx.run_id}, "max_concurrency": int(ctx.cfg["concurrency"]),
                   "recursion_limit": 100000}
         if not resume:
-            return await app.ainvoke({}, config=config)
+            out = await app.ainvoke({}, config=config)
+            if approve is None:
+                return out
+            snap = await app.aget_state(config)
+            if not await approve(snap.values):
+                runs.write_status(ctx, phase="declined")
+                ctx.emit("phase", phase="declined", detail="plan not approved; nothing was spent")
+                return snap.values
+            return await app.ainvoke(None, config=config)
         snap = await app.aget_state(config)
         if snap.next:  # crashed / killed mid-run: just continue
             ctx.log(f"resume: continuing at {snap.next}")

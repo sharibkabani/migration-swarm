@@ -138,6 +138,7 @@ def judge_round(ctx: RunContext, *, setup_info: dict, unit_files: dict[str, list
 
     ts_files = [ts_name(f) for uid in candidates for f in unit_files[uid]]
     js_files = [f for uid in candidates for f in unit_files[uid]]
+    ctx.emit("judge_step", step="typecheck", detail=f"strict tsc + escape scan on {len(ts_files)} files")
     res = setup_mod.judge_request(ctx, setup_info["tsconfig"], "emit", emit=True, escape_files=ts_files,
                                   normalize=js_files, norm_dir="cand_norm")
     diags = res["diagnostics"]
@@ -181,7 +182,10 @@ def judge_round(ctx: RunContext, *, setup_info: dict, unit_files: dict[str, list
         for uid in testable:
             for js in unit_files[uid]:
                 files[js] = emit_dir / js if uid in included else _original_source(ctx, commit, js)
-        return setup_mod.run_tests(ctx, setup_mod.build_overlay(ctx, files))
+        ctx.emit("judge_step", step="tests", detail=f"test run {runs}: {len(included)} of {len(testable)} candidate units")
+        r = setup_mod.run_tests(ctx, setup_mod.build_overlay(ctx, files))
+        ctx.emit("judge_tests", units=len(included), ok=r.ok, passed=r.passed, failed=r.failed)
+        return r
 
     if testable:
         good: list[str] = []

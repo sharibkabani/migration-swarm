@@ -17,16 +17,27 @@ from migration_swarm.core import config as config_mod, graph, runs
 from migration_swarm.core.context import RepoSpec
 from migration_swarm.core.llm import LLM
 
-app = typer.Typer(add_completion=False, help="Migrate codebases with a swarm of agents and a deterministic judge.")
+app = typer.Typer(add_completion=False, invoke_without_command=True,
+                  help="Migrate codebases with a swarm of agents and a deterministic judge. Run with no command for the interactive mode.")
+
+
+@app.callback()
+def _root(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _load_dotenv()
+        from migration_swarm import tui
+        raise typer.Exit(tui.main())
 
 
 def _load_dotenv() -> None:
-    env = Path(".env")
-    if env.exists():
-        for line in env.read_text().splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    """Env vars from ./.env, then ~/.migration-swarm/.env (existing env vars always win)."""
+    for env in (Path(".env"), runs.HOME_DIR / ".env"):
+        if env.exists():
+            for line in env.read_text().splitlines():
+                if "=" in line and not line.lstrip().startswith("#"):
+                    k, v = line.split("=", 1)
+                    if v.strip():
+                        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
 def _manifest_entry(manifest: Path, name: str) -> dict:
@@ -60,12 +71,13 @@ def run(
     manifest: Optional[Path] = typer.Option(None, help="Take repo settings from a benchmark manifest..."),
     name: Optional[str] = typer.Option(None, help="...entry with this name."),
     run_id: Optional[str] = typer.Option(None),
+    provider: Optional[str] = typer.Option(None, help="Model provider: claude | gemini | openai (default claude)."),
     backend: Optional[str] = typer.Option(None, help="LLM backend: 'api' (ANTHROPIC_API_KEY, billed) or 'plan' (Claude Agent SDK on your Claude plan login, not billed)."),
 ) -> None:
     """Start a migration run. Output: a branch in runs/<run-id>/work plus runs/<run-id>/report.{json,md}."""
     _load_dotenv()
     pack = migrations.load(migration)
-    cfg = config_mod.load(config, budget_usd=budget, concurrency=concurrency, llm_backend=backend)
+    cfg = config_mod.load(config, budget_usd=budget, concurrency=concurrency, llm_backend=backend, provider=provider)
     if manifest and name:
         e = _manifest_entry(manifest, name)
         repo_path = repo_path if repo_path != "-" else e["url"]
@@ -78,8 +90,11 @@ def run(
             raise typer.BadParameter("for a remote repo, pass --image/--install/--test/--test-runner/--source-dir")
     spec = RepoSpec(image or spec.image, install or spec.install, test or spec.test, test_runner or spec.test_runner,
                     list(source_dir) if source_dir else spec.source_dirs, list(test_path) if test_path else spec.test_paths)
-    if cfg.get("llm_backend", "api") == "api" and not os.environ.get("ANTHROPIC_API_KEY"):
-        typer.echo("ANTHROPIC_API_KEY is not set (env var or .env). Or use --backend plan to run on your Claude plan.", err=True)
+    from migration_swarm.core.providers import PROVIDERS
+    prov = PROVIDERS[cfg["provider"]]
+    if cfg.get("llm_backend", "api") == "api" and not prov.key():
+        typer.echo(f"{' or '.join(prov.env_keys)} is not set (env var or .env)."
+                   + (" Or use --backend plan to run on your Claude plan." if prov.name == "claude" else ""), err=True)
         raise typer.Exit(2)
     ctx = runs.create(repo_path, migration, spec, cfg, run_id=run_id, ref=ref)
     typer.echo(f"run id: {ctx.run_id}  (dir: {ctx.run_dir})")
@@ -87,7 +102,7 @@ def run(
 
 
 def _execute(ctx, pack, resume: bool) -> None:
-    ctx.llm = LLM(ctx.cfg, ctx.meter, ctx.run_id, ctx.migration, log=ctx.log)
+    ctx.llm = LLM(ctx.cfg, ctx.meter, ctx.run_id, ctx.migration, log=ctx.log, emit=ctx.emit)
     asyncio.run(graph.execute(ctx, pack, resume=resume))
     typer.echo((ctx.run_dir / "report.md").read_text() if (ctx.run_dir / "report.md").exists() else "no report written")
 
@@ -155,6 +170,7 @@ def eval_cmd(
     budget: Optional[float] = typer.Option(None, help="USD budget per run (swarm and Claude baselines)."),
     out: Optional[Path] = typer.Option(None, help="Output dir (default evals/<migration>/<date>)."),
     config: Optional[Path] = typer.Option(None),
+    provider: Optional[str] = typer.Option(None, help="Model provider: claude | gemini | openai (default claude)."),
     backend: Optional[str] = typer.Option(None, help="LLM backend: 'api' (ANTHROPIC_API_KEY, billed) or 'plan' (Claude Agent SDK on your Claude plan login, not billed)."),
 ) -> None:
     """Run every system on every repo and write one comparison table (markdown + CSV)."""
@@ -163,7 +179,7 @@ def eval_cmd(
     _load_dotenv()
     out_dir = evals.run_eval(migration, manifest, [s.strip() for s in systems.split(",")], runs_per_cell=runs,
                              repos=[r.strip() for r in repos.split(",")] if repos else None, budget=budget,
-                             out_dir=out, config=config, backend=backend)
+                             out_dir=out, config=config, backend=backend, provider=provider)
     typer.echo((out_dir / "results.md").read_text())
 
 

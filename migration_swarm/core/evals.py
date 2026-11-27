@@ -47,7 +47,7 @@ def swarm_system(concurrency: int):
         spec = pack.evaluate.spec_from_entry(entry)
         ctx = runs.create(str(clone_src), pack.NAME, spec, c, run_id="swarm", ref=entry["pre_migration_sha"],
                           base=run_dir)
-        ctx.llm = LLM(c, ctx.meter, ctx.run_id, ctx.migration, log=ctx.log)
+        ctx.llm = LLM(c, ctx.meter, ctx.run_id, ctx.migration, log=ctx.log, emit=ctx.emit)
         start = time.monotonic()
         asyncio.run(graph.execute(ctx, pack))
         rep = json.loads((ctx.run_dir / "report.json").read_text())
@@ -121,11 +121,11 @@ def render_md(migration: str, aggs: list[dict], pack, meta: dict) -> str:
 
 def run_eval(migration: str, manifest: Path, systems: list[str], *, runs_per_cell: int = 3, repos: list[str] | None = None,
              budget: float | None = None, out_dir: Path | None = None, config: Path | None = None,
-             backend: str | None = None) -> Path:
+             backend: str | None = None, provider: str | None = None) -> Path:
     from migration_swarm import migrations as migrations_mod
 
     pack = migrations_mod.load(migration)
-    cfg = config_mod.load(config, budget_usd=budget, llm_backend=backend)
+    cfg = config_mod.load(config, budget_usd=budget, llm_backend=backend, provider=provider)
     entries = [e for e in yaml.safe_load(manifest.read_text())["repos"] if not repos or e["name"] in repos]
     all_systems = systems_for(pack)
     if systems == ["all"]:

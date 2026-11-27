@@ -18,7 +18,7 @@ def _llm(caller, **plan):
 
 
 def test_plan_call_is_metered_at_api_prices():
-    async def caller(model, effort, max_tokens, system, user):
+    async def caller(model, effort, max_tokens, system, user, on_text=None):
         return plan_llm.PlanReply("ok", Usage(input_tokens=1000, output_tokens=2000), "end_turn")
 
     llm, meter = _llm(caller)
@@ -32,7 +32,7 @@ def test_plan_call_is_metered_at_api_prices():
 def test_usage_limit_pauses_all_calls_then_retries(monkeypatch):
     calls = []
 
-    async def caller(model, effort, max_tokens, system, user):
+    async def caller(model, effort, max_tokens, system, user, on_text=None):
         calls.append(time.time())
         if len(calls) == 1:
             raise plan_llm.PlanRateLimited(time.time() - 100, "five_hour")  # reset already passed -> min wait
@@ -53,7 +53,7 @@ def test_usage_limit_pauses_all_calls_then_retries(monkeypatch):
 
 
 def test_gives_up_past_max_wait():
-    async def caller(*a):
+    async def caller(*a, **k):
         raise plan_llm.PlanRateLimited(time.time() + 10 * 3600, "seven_day")
 
     llm, meter = _llm(caller, max_wait_s=3600)
