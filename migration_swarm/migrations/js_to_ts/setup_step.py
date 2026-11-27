@@ -166,7 +166,7 @@ def _is_ours(ctx: RunContext) -> bool:
 
 
 def judge_request(ctx: RunContext, tsconfig: str, out: str, *, emit: bool, escape_files=(), normalize=(),
-                  norm_dir: str = "", list_exports=()) -> dict:
+                  norm_dir: str = "", list_exports=(), transpile_tokens=()) -> dict:
     """Paths: tsconfig relative to the workdir; out/norm_dir relative to the run dir (mounted at /scratch).
 
     Diagnostics on files that are still JavaScript are dropped (checkJs is off; they are not ours to fix).
@@ -175,6 +175,7 @@ def judge_request(ctx: RunContext, tsconfig: str, out: str, *, emit: bool, escap
         "project": f"/work/{tsconfig}", "outDir": f"/scratch/{out}", "buildInfo": f"/scratch/{out}.tsbuildinfo",
         "emit": emit, "escapeFiles": list(escape_files), "normalize": list(normalize),
         "normDir": f"/scratch/{norm_dir}" if norm_dir else "", "listExports": list(list_exports),
+        "transpileTokens": list(transpile_tokens),
     })
     res["diagnostics"] = [d for d in res["diagnostics"]
                           if d["file"] is None or not d["file"].endswith((".js", ".mjs", ".cjs", ".jsx"))]

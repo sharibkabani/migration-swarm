@@ -212,6 +212,20 @@ for (const f of req.normalize || []) {
   fs.writeFileSync(dest, canonicalTokens(fs.readFileSync(src, "utf8")).join("\n") + "\n");
 }
 
+// transpileTokens: source files (relative to the project dir, JS or TS) transpiled on their own with
+// the project's options and written to normDir/<path>.tok as canonical tokens. Used to check that a
+// test file renamed to .ts differs from the original only by types.
+for (const f of req.transpileTokens || []) {
+  const src = path.join(projectDir, f);
+  if (!fs.existsSync(src)) continue;
+  const out = ts.transpileModule(fs.readFileSync(src, "utf8"), {
+    compilerOptions: { ...parsed.options, noEmit: false, declaration: false, sourceMap: false }, fileName: src,
+  });
+  const dest = path.join(req.normDir, f + ".tok");
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, canonicalTokens(out.outputText).join("\n") + "\n");
+}
+
 // Exported names of npm packages, from their installed type declarations (so workers do not guess).
 const packageExports = {};
 if ((req.listExports || []).length) {

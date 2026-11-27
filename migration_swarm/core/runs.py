@@ -20,9 +20,9 @@ def new_run_id() -> str:
 
 
 def create(source_repo: str, migration: str, repo: RepoSpec, cfg: dict, run_id: str | None = None,
-           ref: str | None = None) -> RunContext:
+           ref: str | None = None, base: Path | None = None) -> RunContext:
     run_id = run_id or new_run_id()
-    run_dir = RUNS_DIR / run_id
+    run_dir = (base or RUNS_DIR) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     work = run_dir / "work"
     subprocess.run(["git", "clone", "-q", "--no-hardlinks", source_repo, str(work)], check=True)

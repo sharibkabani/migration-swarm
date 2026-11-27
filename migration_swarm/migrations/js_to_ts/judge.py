@@ -22,7 +22,7 @@ from pathlib import Path
 
 from migration_swarm.core import integrity
 from migration_swarm.core.context import RunContext
-from migration_swarm.migrations.js_to_ts import setup as setup_mod
+from migration_swarm.migrations.js_to_ts import setup_step as setup_mod
 from migration_swarm.migrations.js_to_ts.prompts import ts_name
 from migration_swarm.migrations.js_to_ts.testresults import TestResult
 

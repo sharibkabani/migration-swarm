@@ -5,8 +5,8 @@
 
 # run outputs and eval artifacts
 runs/
+evals/**/work/
 evals/**/raw/
-evals/**/artifacts/
 *.sqlite
 *.sqlite-journal
 checkpoints/

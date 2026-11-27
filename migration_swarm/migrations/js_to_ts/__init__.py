@@ -7,7 +7,7 @@ from pathlib import Path
 
 from migration_swarm.core.context import RepoSpec, RunContext
 from migration_swarm.migrations.js_to_ts import analyzer, finalize as finalize_mod, judge as judge_mod, prompts
-from migration_swarm.migrations.js_to_ts import setup as setup_mod
+from migration_swarm.migrations.js_to_ts import setup_step as setup_mod
 
 NAME = "js-to-ts"
 DESCRIPTION = "JavaScript -> strict TypeScript (in place, file by file, tests unchanged)"
