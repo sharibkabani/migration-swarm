@@ -1,0 +1,105 @@
+# JS -> TS benchmark. Every SHA below was resolved from the real upstream repo (git ls-remote / clone).
+# LOC = cloc "code" lines (non-blank, non-comment) of JavaScript in source_dirs, excluding tests and fixtures.
+# ground_truth_sha = the commit where the maintainers finished their own JS->TS migration (null if none).
+# Status is filled in by scripts/verify_benchmark.py; see benchmarks/js_to_ts/verification.json.
+migration: js-to-ts
+repos:
+  - name: cheerio
+    url: https://github.com/cheeriojs/cheerio
+    pre_migration_sha: 8b0792d91bb97233abd1087bfdc010444118de97   # v1.0.0-rc.6 era, 2021-04-17
+    ground_truth_sha: 726f94a4677fd07b9528079172fe6176e70235be     # "refactor: Convert to TypeScript" (after 6e8c9c0 "Rename files from JS to TS")
+    image: node:16-bullseye
+    install: npm ci
+    test: npx jest
+    test_runner: jest
+    source_dirs: [lib]
+    test_paths: [test, lib/__fixtures__]
+    ground_truth_path_map: {"lib/": "src/"}   # maintainers moved lib/ -> src/ and merged tests into *.spec.ts
+    loc: {source_code: 1539, source_files: 13, test_code: 5129}
+    notes: Plain JS with JSDoc comments; ships hand-written types/index.d.ts.
+
+  - name: yup
+    url: https://github.com/jquense/yup
+    pre_migration_sha: b6262ea8f32895b67225342afe82ff439cd550c9   # v0.31.1, 2020-12-03
+    ground_truth_sha: b97c39de5bbaf18adc2ed2c00a4a4ea4d63e6110     # "feat: typescript support (#1134)"
+    image: node:14-bullseye
+    install: yarn install --frozen-lockfile
+    test: yarn test-all --runInBand
+    test_runner: jest
+    source_dirs: [src]
+    test_paths: [test, jest-sync.config.json]
+    loc: {source_code: 1895, source_files: 26, test_code: 2700}
+    notes: Babel-compiled ES modules. Ground truth is partial - src/setLocale.js and src/util/isodate.js stayed JS.
+
+  - name: marked
+    url: https://github.com/markedjs/marked
+    pre_migration_sha: 929d235ed294e0e89f837cd3c2f4f308b7fce0ab   # v5.1.2, 2023-07-29
+    ground_truth_sha: cb549065f16fbd4a01bab3292bfd2ab0b116c1b2     # "fix: Migrate to Typescript (#2805)"
+    image: node:18-bookworm
+    install: npm ci
+    test: npx jasmine --config=jasmine.json
+    test_runner: jasmine
+    source_dirs: [src]
+    test_paths: [test, jasmine.json]
+    loc: {source_code: 2349, source_files: 12, test_code: 3589}
+    notes: Native ESM ("type":"module"); specs import ../../src/*.js directly.
+
+  - name: hexo
+    url: https://github.com/hexojs/hexo
+    pre_migration_sha: 7edbf25d5b4c4d7fdf99ff2439cfd9b2cb1cfe0d   # v6.3.0 era, 2023-03-10
+    ground_truth_sha: 148ed7c91c96d9ef151020d339ccc242f16951ea     # "refactor: migrate typescript (#5092)"
+    image: node:18-bookworm
+    # No lockfile upstream: resolve dependencies as of the pinned commit's date for reproducibility.
+    install: npm install --before=2023-03-15 --ignore-scripts
+    test: npx mocha test/index.js
+    test_runner: mocha
+    source_dirs: [lib]
+    test_paths: [test]
+    loc: {source_code: 6312, source_files: 144, test_code: 14499}
+    notes: CommonJS. Many small files, deep dependency graph.
+
+  - name: knex
+    url: https://github.com/knex/knex
+    pre_migration_sha: e25d54bcb707714a17f5a5744eba5c4246bb4d1d   # tag 3.3.0
+    ground_truth_sha: null
+    image: node:20-bookworm
+    # No lockfile upstream: resolve dependencies as of the tag date (2026-06-26).
+    install: npm install --before=2026-06-27
+    test: npm run test:unit-only
+    test_runner: mocha
+    source_dirs: [lib]
+    test_paths: [test]
+    loc: {source_code: 18493, source_files: 146, test_code: 63096}
+    notes: CommonJS; lib has 1 pre-existing .ts file plus hand-written types/. Unit tests only (no DB servers).
+
+  - name: stylelint
+    url: https://github.com/stylelint/stylelint
+    pre_migration_sha: 9e7319df4810fed31dc849cc7a2c3082fc2bed64   # tag 15.10.3 (last CommonJS line), 2023-08-18
+    ground_truth_sha: null
+    image: node:18-bookworm
+    install: npm ci
+    # lib/rules/__tests__/index.test.mjs runs `npm install stylelint-config-standard` at test time;
+    # tests are always network-off, so that one meta-suite is excluded (file left untouched).
+    # Also excluded: one mtime-granularity-dependent test that failed 2 of 3 baseline runs.
+    test: node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathIgnorePatterns /node_modules/ lib/rules/__tests__/index.test.mjs -t '^(?![\s\S]*cacheStrategy is "metadata")'
+    excluded_tests:
+      - lib/rules/__tests__/index.test.mjs            # needs network (npm install at test time)
+      - 'lib/__tests__/standalone-cache.test.mjs > cacheStrategy is "metadata"'   # flaky (mtime)
+    test_runner: jest
+    source_dirs: [lib]
+    test_paths: ["lib/**/__tests__", "lib/**/testUtils", "lib/**/*.test.js", "lib/**/*.test.mjs", system-tests, "package.json#jest"]
+    loc: {source_code: 25297, source_files: 393, test_code: 88048}
+    notes: CommonJS. Tests are co-located in lib/**/__tests__.
+
+  - name: mathjs
+    url: https://github.com/josdejong/mathjs
+    pre_migration_sha: 0f5c9095c38db71180a175990c73407db4a0db70   # tag v15.3.0
+    ground_truth_sha: null
+    image: node:22-bookworm
+    install: npm ci
+    test: npx mocha test/unit-tests
+    test_runner: mocha
+    source_dirs: [src]
+    test_paths: [test]
+    loc: {source_code: 37607, source_files: 676, test_code: 48421}
+    notes: Native ESM; factory-function style with a hand-written types/index.d.ts.

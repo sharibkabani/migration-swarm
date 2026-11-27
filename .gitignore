@@ -1,0 +1,36 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# run outputs and eval artifacts
+runs/
+evals/**/raw/
+evals/**/artifacts/
+*.sqlite
+*.sqlite-journal
+checkpoints/
+
+# benchmark clones / scratch work dirs
+.bench_cache/
+benchmarks/**/clones/
+workdirs/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# node (fixtures/tools)
+node_modules/
+
+# os/editor
+.DS_Store
+.idea/
+.vscode/

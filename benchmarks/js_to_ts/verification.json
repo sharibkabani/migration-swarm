@@ -1,0 +1,354 @@
+{
+  "manifest": "benchmarks/js_to_ts/manifest.yaml",
+  "repos": {
+    "cheerio": {
+      "name": "cheerio",
+      "url": "https://github.com/cheeriojs/cheerio",
+      "pre_migration_sha": "8b0792d91bb97233abd1087bfdc010444118de97",
+      "pre_migration_sha_exists": true,
+      "pre_migration_sha_date": "2021-05-06",
+      "ground_truth_sha_exists": true,
+      "ground_truth_sha_date": "2021-05-06",
+      "install": {
+        "ok": true,
+        "exit_code": 0,
+        "seconds": 3.7
+      },
+      "test_runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 5.3,
+          "counts": {
+            "passed": 693,
+            "total": 693
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 4.4,
+          "counts": {
+            "passed": 693,
+            "total": 693
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 4.4,
+          "counts": {
+            "passed": 693,
+            "total": 693
+          }
+        }
+      ],
+      "stable": true,
+      "verdict": "PASS",
+      "verified_at": "2026-11-27T14:08:17+00:00"
+    },
+    "yup": {
+      "name": "yup",
+      "url": "https://github.com/jquense/yup",
+      "pre_migration_sha": "b6262ea8f32895b67225342afe82ff439cd550c9",
+      "pre_migration_sha_exists": true,
+      "pre_migration_sha_date": "2020-11-30",
+      "ground_truth_sha_exists": true,
+      "ground_truth_sha_date": "2020-12-03",
+      "install": {
+        "ok": true,
+        "exit_code": 0,
+        "seconds": 4.4
+      },
+      "test_runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 4.8,
+          "counts": {
+            "skipped": 2,
+            "passed": 572,
+            "total": 574
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 4.7,
+          "counts": {
+            "skipped": 2,
+            "passed": 572,
+            "total": 574
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 4.4,
+          "counts": {
+            "skipped": 2,
+            "passed": 572,
+            "total": 574
+          }
+        }
+      ],
+      "stable": true,
+      "verdict": "PASS",
+      "verified_at": "2026-11-27T14:08:37+00:00"
+    },
+    "marked": {
+      "name": "marked",
+      "url": "https://github.com/markedjs/marked",
+      "pre_migration_sha": "929d235ed294e0e89f837cd3c2f4f308b7fce0ab",
+      "pre_migration_sha_exists": true,
+      "pre_migration_sha_date": "2023-07-25",
+      "ground_truth_sha_exists": true,
+      "ground_truth_sha_date": "2023-07-29",
+      "install": {
+        "ok": true,
+        "exit_code": 0,
+        "seconds": 3.0
+      },
+      "test_runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 3.4,
+          "counts": {
+            "total": 1629,
+            "failed": 0,
+            "skipped": 0,
+            "passed": 1629
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 2.9,
+          "counts": {
+            "total": 1629,
+            "failed": 0,
+            "skipped": 0,
+            "passed": 1629
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 2.6,
+          "counts": {
+            "total": 1629,
+            "failed": 0,
+            "skipped": 0,
+            "passed": 1629
+          }
+        }
+      ],
+      "stable": true,
+      "verdict": "PASS",
+      "verified_at": "2026-11-27T14:08:50+00:00"
+    },
+    "hexo": {
+      "name": "hexo",
+      "url": "https://github.com/hexojs/hexo",
+      "pre_migration_sha": "7edbf25d5b4c4d7fdf99ff2439cfd9b2cb1cfe0d",
+      "pre_migration_sha_exists": true,
+      "pre_migration_sha_date": "2023-03-10",
+      "ground_truth_sha_exists": true,
+      "ground_truth_sha_date": "2023-03-15",
+      "install": {
+        "ok": true,
+        "exit_code": 0,
+        "seconds": 10.4
+      },
+      "test_runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 13.7,
+          "counts": {
+            "passed": 1147,
+            "skipped": 5
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 13.2,
+          "counts": {
+            "passed": 1147,
+            "skipped": 5
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 12.8,
+          "counts": {
+            "passed": 1147,
+            "skipped": 5
+          }
+        }
+      ],
+      "stable": true,
+      "verdict": "PASS",
+      "verified_at": "2026-11-27T14:09:42+00:00"
+    },
+    "knex": {
+      "name": "knex",
+      "url": "https://github.com/knex/knex",
+      "pre_migration_sha": "e25d54bcb707714a17f5a5744eba5c4246bb4d1d",
+      "pre_migration_sha_exists": true,
+      "pre_migration_sha_date": "2026-06-26",
+      "install": {
+        "ok": true,
+        "exit_code": 0,
+        "seconds": 11.3
+      },
+      "test_runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 11.0,
+          "counts": {
+            "passed": 1849,
+            "skipped": 50
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 10.5,
+          "counts": {
+            "passed": 1849,
+            "skipped": 50
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 10.4,
+          "counts": {
+            "passed": 1849,
+            "skipped": 50
+          }
+        }
+      ],
+      "stable": true,
+      "verdict": "PASS",
+      "verified_at": "2026-11-27T14:10:25+00:00"
+    },
+    "stylelint": {
+      "name": "stylelint",
+      "url": "https://github.com/stylelint/stylelint",
+      "pre_migration_sha": "9e7319df4810fed31dc849cc7a2c3082fc2bed64",
+      "pre_migration_sha_exists": true,
+      "pre_migration_sha_date": "2023-08-18",
+      "install": {
+        "ok": true,
+        "exit_code": 0,
+        "seconds": 4.2
+      },
+      "test_runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 26.7,
+          "counts": {
+            "skipped": 13,
+            "passed": 14187,
+            "total": 14200
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 26.3,
+          "counts": {
+            "skipped": 13,
+            "passed": 14187,
+            "total": 14200
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 29.8,
+          "counts": {
+            "skipped": 13,
+            "passed": 14187,
+            "total": 14200
+          }
+        }
+      ],
+      "stable": true,
+      "verdict": "PASS",
+      "verified_at": "2026-11-27T14:19:26+00:00"
+    },
+    "mathjs": {
+      "name": "mathjs",
+      "url": "https://github.com/josdejong/mathjs",
+      "pre_migration_sha": "0f5c9095c38db71180a175990c73407db4a0db70",
+      "pre_migration_sha_exists": true,
+      "pre_migration_sha_date": "2026-11-23",
+      "install": {
+        "ok": true,
+        "exit_code": 0,
+        "seconds": 3.4
+      },
+      "test_runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 11.2,
+          "counts": {
+            "passed": 6717,
+            "skipped": 21
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 10.9,
+          "counts": {
+            "passed": 6717,
+            "skipped": 21
+          }
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "seconds": 10.6,
+          "counts": {
+            "passed": 6717,
+            "skipped": 21
+          }
+        }
+      ],
+      "stable": true,
+      "verdict": "PASS",
+      "verified_at": "2026-11-27T14:12:36+00:00"
+    }
+  }
+}
