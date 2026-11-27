@@ -241,6 +241,8 @@ class Dashboard:
         self.started = time.time()
         self.last_log = ""
         self.plan_wait: float | None = None
+        self.total: int | None = None   # unit count when not every unit has been seen yet (watch)
+        self.hint = " ctrl-c to stop · resume later "
 
     # events arrive from worker threads; dict/deque updates are atomic enough for a view
     def on_event(self, ev: dict) -> None:
@@ -256,7 +258,7 @@ class Dashboard:
         elif k == "agent_start":
             self.agents[ev["agent"]] = {"role": ev["role"], "files": ev["files"], "unit": ev["unit"], "model": ev["model"],
                                         "attempt": ev["attempt"], "degraded": ev["degraded"], "state": "thinking",
-                                        "chars": 0, "tail": "", "t0": time.time(), "cost": None}
+                                        "chars": 0, "tail": "", "t0": ev.get("t", time.time()), "cost": None}
             self.units.setdefault(ev["unit"], "pending")
         elif k == "agent_progress" and ev["agent"] in self.agents:
             a = self.agents[ev["agent"]]
@@ -283,7 +285,7 @@ class Dashboard:
                 why = " · " + str(ev["reasons"][0]).replace("\n", " ")[:90]
             verb = {"accepted": "accepted", "degraded": "accepted (degraded)", "rejected": "rejected, retrying",
                     "failed": "failed, left as JavaScript"}[ev["status"]]
-            self.activity.append((time.time(), Text.assemble((f"{icon} ", color), (name, "bold"), (f"  {verb}", color),
+            self.activity.append((ev.get("t", time.time()), Text.assemble((f"{icon} ", color), (name, "bold"), (f"  {verb}", color),
                                                               (why, DIM))))
             a = self.agents.get(ev["unit"])
             if a:
@@ -291,7 +293,7 @@ class Dashboard:
         elif k == "steward":
             msg = (f"merged {ev['requests']} shared type requests" if not ev["rejected"]
                    else f"rejected shared types: {ev['rejected'][0]}")
-            self.activity.append((time.time(), Text.assemble(("◆ ", ACCENT), ("steward", "bold"), (f"  {msg}", DIM))))
+            self.activity.append((ev.get("t", time.time()), Text.assemble(("◆ ", ACCENT), ("steward", "bold"), (f"  {msg}", DIM))))
         elif k == "plan_wait":
             self.plan_wait = ev["until"]
         elif k == "log":
@@ -306,7 +308,8 @@ class Dashboard:
     def _header(self) -> Table:
         snap = self.ctx.meter.snapshot()
         el = int(time.time() - self.started)
-        total = len(self.units) or 1
+        n_units = max(self.total or 0, len(self.units))
+        total = n_units or 1
         counts = collections.Counter(self.units.values())
         done = counts["accepted"] + counts["degraded"] + counts["failed"]
         g = Table.grid(padding=(0, 2), expand=True)
@@ -318,7 +321,7 @@ class Dashboard:
         g.add_row("", Text.assemble((phase, f"bold {ACCENT}"), (layer, ""), (f"  {self.detail}" if self.phase != "migrate" else "", DIM)),
                   Text(f"{el // 60:02d}:{el % 60:02d}", style=DIM))
         g.add_row("files", ProgressBar(total=total, completed=done, width=None, complete_style=OK, finished_style=OK),
-                  Text.assemble((f"{done}/{len(self.units)}", "bold"), "  ",
+                  Text.assemble((f"{done}/{n_units}", "bold"), "  ",
                                 (f"✓ {counts['accepted']}", OK), "  ", (f"◐ {counts['degraded']}", WARN), "  ",
                                 (f"✗ {counts['failed']}", BAD)))
         spent, budget = snap["spent_usd"], snap["budget_usd"]
@@ -383,7 +386,7 @@ class Dashboard:
             parts.append(Padding(act, (0, 1, 1, 3)))
         return Panel(Group(*parts), box=box.ROUNDED, border_style=DIM,
                      title=Text.assemble((" migration-swarm ", f"bold {ACCENT}"), (f"{self.ctx.migration} ", DIM)),
-                     title_align="left", subtitle=Text(" ctrl-c to stop · resume later ", style=DIM), subtitle_align="right")
+                     title_align="left", subtitle=Text(self.hint, style=DIM), subtitle_align="right")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -526,3 +529,72 @@ def main() -> int:
     except Abort:
         console.print(Text("  bye", style=DIM))
         return 130
+
+
+# ---------------------------------------------------------------------------------------------
+# watch an existing run (another process is running it)
+
+
+class _FileMeter:
+    def __init__(self, run_dir: Path):
+        self.run_dir = run_dir
+
+    def snapshot(self) -> dict:
+        try:
+            c = json.loads((self.run_dir / "status.json").read_text()).get("cost") or {}
+        except (OSError, ValueError):
+            c = {}
+        return {"spent_usd": c.get("spent_usd", 0.0), "budget_usd": c.get("budget_usd", 0.0) or 1.0,
+                "tokens": c.get("tokens", {})}
+
+
+def watch(run_dir: Path) -> int:
+    """Live dashboard for a run started elsewhere (CLI, eval, MCP), built from its events.jsonl."""
+    meta = json.loads((run_dir / "run.json").read_text()) if (run_dir / "run.json").exists() else {}
+    cfg = json.loads((run_dir / "config.json").read_text()) if (run_dir / "config.json").exists() else {}
+
+    class Ctx:
+        migration = meta.get("migration", "")
+        meter = _FileMeter(run_dir)
+
+    dash = Dashboard(Ctx, cfg.get("provider", "claude"), cfg.get("llm_backend", "api"))
+    dash.hint = " watching · ctrl-c stops watching, not the run "
+    ev_path = run_dir / "events.jsonl"
+    pos = 0
+    first = True
+    console.print(Text(f"  watching {run_dir}  ·  ctrl-c to stop watching (the run keeps going)", style=DIM))
+    try:
+        with Live(dash, console=console, refresh_per_second=4) as live:
+            while True:
+                if ev_path.exists():
+                    with ev_path.open() as f:
+                        f.seek(pos)
+                        for line in f:
+                            if not line.endswith("\n"):
+                                break
+                            pos += len(line.encode())
+                            ev = json.loads(line)
+                            if first:
+                                dash.started, first = ev["t"], False
+                            dash.on_event(ev)
+                st = {}
+                if (run_dir / "status.json").exists():
+                    try:
+                        st = json.loads((run_dir / "status.json").read_text())
+                    except ValueError:
+                        pass
+                if st.get("units"):
+                    dash.total = st["units"]
+                if st.get("phase") in ("done", "declined", "awaiting_approval"):
+                    live.refresh()
+                    break
+                time.sleep(0.5)
+    except KeyboardInterrupt:
+        return 0
+    if (run_dir / "report.json").exists():
+        class C:
+            pass
+        c = C()
+        c.run_dir, c.run_id = run_dir, run_dir.name
+        summary(c)
+    return 0

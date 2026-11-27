@@ -144,6 +144,17 @@ def resume(run_id: str, budget: Optional[float] = typer.Option(None, help="Raise
 
 
 @app.command()
+def watch(run: str = typer.Argument(..., help="Run id, or a run directory (e.g. an eval run's .../swarm).")) -> None:
+    """Live dashboard for a run that is going on in another process."""
+    d = Path(run) if Path(run).is_dir() else runs.RUNS_DIR / run
+    if not (d / "run.json").exists():
+        typer.echo(f"no run at {d}", err=True)
+        raise typer.Exit(1)
+    from migration_swarm import tui
+    raise typer.Exit(tui.watch(d))
+
+
+@app.command()
 def mcp() -> None:
     """Run the MCP server (stdio) for Claude Code and other MCP clients."""
     _load_dotenv()
