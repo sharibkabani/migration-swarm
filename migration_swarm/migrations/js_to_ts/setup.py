@@ -93,18 +93,39 @@ def _install_dev(ctx: RunContext, specs: list[str]) -> None:
         raise SetupFailed(f"installing {specs} failed:\n{r.output[-3000:]}")
 
 
+def _installed_major(workdir: Path, pkg: str) -> str | None:
+    pj = workdir / "node_modules" / pkg / "package.json"
+    if not pj.exists():
+        return None
+    v = json.loads(pj.read_text()).get("version", "")
+    return v.split(".")[0] if v[:1].isdigit() else None
+
+
 def install_types(ctx: RunContext, analysis: Analysis, node_major: int) -> list[str]:
-    wanted = [p for p in analysis.externals if not _has_bundled_types(ctx.workdir, p)]
-    candidates = [_types_name(p) for p in wanted if not p.startswith("@types/")]
+    """@types for npm deps without bundled types, pinned to the installed package's major version when
+    such a @types release exists (e.g. parse5 v6 needs @types/parse5@6; @types/parse5@latest is a stub)."""
+    wanted = [p for p in analysis.externals if not _has_bundled_types(ctx.workdir, p) and not p.startswith("@types/")]
     found: list[str] = []
-    if candidates:
-        script = "; ".join(f"echo {shlex.quote(c)}=$(npm view {shlex.quote(c)} version 2>/dev/null)" for c in candidates)
-        r = sandbox.run(ctx.workdir, ctx.repo.image, script, network=True, workdir_read_only=True, timeout_s=600)
+    if wanted:
+        lines = []
+        for p in wanted:
+            t, major = _types_name(p), _installed_major(ctx.workdir, p)
+            pinned = f"{t}@{major}" if major else t
+            lines.append(f"echo {shlex.quote(pinned)}=$(npm view {shlex.quote(pinned)} version 2>/dev/null | tail -1)")
+            if major:
+                lines.append(f"echo {shlex.quote(t)}=$(npm view {shlex.quote(t)} version 2>/dev/null)")
+        r = sandbox.run(ctx.workdir, ctx.repo.image, "; ".join(lines), network=True, workdir_read_only=True, timeout_s=600)
+        avail = {}
         for line in r.output.splitlines():
-            if "=" in line and line.startswith("@types/"):
+            if line.startswith("@types/") and "=" in line:
                 name, ver = line.split("=", 1)
-                if ver.strip():
-                    found.append(name)
+                avail[name] = bool(ver.strip())
+        for p in wanted:
+            t, major = _types_name(p), _installed_major(ctx.workdir, p)
+            if major and avail.get(f"{t}@{major}"):
+                found.append(f"{t}@{major}")
+            elif avail.get(t):
+                found.append(t)
     specs = [f"@types/node@{node_major}", f"typescript@{TS_VERSION}", *found]
     if not ctx.cfg.get("js_to_ts", {}).get("install_types", True):
         ctx.log(f"setup: install_types disabled; not installing {specs}")
@@ -145,13 +166,19 @@ def _is_ours(ctx: RunContext) -> bool:
 
 
 def judge_request(ctx: RunContext, tsconfig: str, out: str, *, emit: bool, escape_files=(), normalize=(),
-                  norm_dir: str = "") -> dict:
-    """Paths: tsconfig relative to the workdir; out/norm_dir relative to the run dir (mounted at /scratch)."""
-    return tools.run_judge_script(ctx.workdir, ctx.run_dir, {
+                  norm_dir: str = "", list_exports=()) -> dict:
+    """Paths: tsconfig relative to the workdir; out/norm_dir relative to the run dir (mounted at /scratch).
+
+    Diagnostics on files that are still JavaScript are dropped (checkJs is off; they are not ours to fix).
+    """
+    res = tools.run_judge_script(ctx.workdir, ctx.run_dir, {
         "project": f"/work/{tsconfig}", "outDir": f"/scratch/{out}", "buildInfo": f"/scratch/{out}.tsbuildinfo",
         "emit": emit, "escapeFiles": list(escape_files), "normalize": list(normalize),
-        "normDir": f"/scratch/{norm_dir}" if norm_dir else "",
+        "normDir": f"/scratch/{norm_dir}" if norm_dir else "", "listExports": list(list_exports),
     })
+    res["diagnostics"] = [d for d in res["diagnostics"]
+                          if d["file"] is None or not d["file"].endswith((".js", ".mjs", ".cjs", ".jsx"))]
+    return res
 
 
 def build_overlay(ctx: RunContext, files: dict[str, Path]) -> Path:
@@ -183,7 +210,11 @@ def setup(ctx: RunContext, analysis: Analysis) -> dict:
     tsconfig = write_tsconfig(ctx, style, node_major, node_types=any(s.startswith("@types/node") for s in installed))
 
     ctx.log("setup: gate - emit untouched JS through tsc and rerun tests on the emitted JS")
-    res = judge_request(ctx, tsconfig, "orig_emit", emit=True, normalize=analysis.files, norm_dir="orig_norm")
+    res = judge_request(ctx, tsconfig, "orig_emit", emit=True, normalize=analysis.files, norm_dir="orig_norm",
+                        list_exports=analysis.externals)
+    npm_exports = {p: {**e, "version": json.loads((ctx.workdir / "node_modules" / p / "package.json").read_text()).get("version")
+                       if (ctx.workdir / "node_modules" / p / "package.json").exists() else None}
+                   for p, e in res.get("packageExports", {}).items()}
     config_errors = [d for d in res["diagnostics"] if d["file"] is None or d["file"].endswith(tsconfig)]
     if config_errors:
         raise SetupFailed("tsconfig errors: " + "; ".join(f"TS{d['code']}: {d['message']}" for d in config_errors[:10]))
@@ -201,7 +232,7 @@ def setup(ctx: RunContext, analysis: Analysis) -> dict:
     info = {
         "baseline": baseline.to_json(), "gate": gate.to_json(), "node_major": node_major, "module_style": style,
         "tsconfig": tsconfig, "installed": installed, "protected": protected, "setup_commit": setup_commit,
-        "shared_types_path": shared_types_path(ctx),
+        "shared_types_path": shared_types_path(ctx), "npm_exports": npm_exports,
     }
     (ctx.run_dir / "setup.json").write_text(json.dumps(info, indent=1))
     return info

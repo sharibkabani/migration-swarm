@@ -11,18 +11,29 @@ MODULE_RULES = {
 - `const { a, b } = require('./x')` -> `const { a, b } = require('./x') as typeof import('./x')` (identical emit; not counted as a cast).
 - `module.exports = X` -> `export = X`. Never combine `export =` with other `export` statements.
 - `exports.name = value` / `module.exports.name = value` (and no `module.exports =`) -> `export const name = value` or `export function name(...)`.
-- Keep every require path exactly as written.""",
+- Keep every require path exactly as written.
+Example (JavaScript -> TypeScript, identical compiled output):
+```js
+const { domEach, isTag } = require('../utils');
+const select = require('cheerio-select');
+exports.closest = function (selector) { return domEach(this, isTag); };
+```
+```ts
+const { domEach, isTag } = require('../utils') as typeof import('../utils');
+import select = require('cheerio-select');
+export const closest = function (this: Cheerio, selector?: string): Cheerio { return domEach(this, isTag); };
+```""",
     "esm-node": """This package is native ESM ("type": "module"). Keep every import/export statement and specifier exactly as written, including the `.js` extension on relative imports (it resolves to the .ts file). Use `import type` for type-only imports.""",
     "esm-bundled": """This package uses ESM syntax compiled by babel. Keep every import/export statement and specifier exactly as written (extensionless relative imports are fine). Use `import type` for type-only imports.""",
 }
 
 WORKER_SYSTEM = """You convert JavaScript modules to strict TypeScript, one module (or one import cycle) at a time. A deterministic judge checks your output; follow every rule.
 
-1. Runtime behaviour must not change. Only add types. Do not change logic, control flow, values, strings, error messages, export shapes or statement order, and do not delete code. The judge compiles your TypeScript and compares the emitted JavaScript with the original; removed or altered runtime lines are rejected.
+1. Runtime behaviour must not change. Only add types. Do not change logic, control flow, values, strings, error messages, export shapes or statement order, and do not delete code. Never rename an identifier, never introduce a new variable or helper, and never change how a value is obtained (keep each `require`, destructuring and property access as it is). The judge compiles your TypeScript and compares the emitted JavaScript token by token with the original; any removed or altered runtime token is rejected.
 2. `tsc` with `strict: true` must report zero errors in your file. Forbidden: `any` (explicit, or implicit from a missing annotation), `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, `as unknown as`. Use `as` casts and non-null `!` sparingly (a few per file at most). Prefer precise types, interfaces, generics, overloads, `unknown` with narrowing, and type predicates.
 3. Module syntax:
 {module_rules}
-4. Types of other project modules are given as declarations. Reuse them via `import type`; do not redeclare them. The declarations of not-yet-migrated modules are inferred from JavaScript and may be loose; type your side precisely anyway.
+4. Only import type names that exist: for npm packages, use the exported names listed in the request (taken from the installed type declarations); if a name you want is not listed, derive the type instead (`ReturnType<typeof fn>`, `Parameters<...>`, indexed access) or declare a local interface. Types of other project modules are given as declarations. Reuse them via `import type`; do not redeclare them. The declarations of not-yet-migrated modules are inferred from JavaScript and may be loose; type your side precisely anyway.
 5. If a type is shared by several modules and does not exist yet, declare it locally and also request it from the shared-types steward (it will be added to `{shared_path}` for later modules).
 6. Keep comments and JSDoc. You may turn JSDoc types into TypeScript types.
 
@@ -57,7 +68,8 @@ def ts_name(js: str) -> str:
 
 
 def worker_messages(*, style: str, shared_path: str, files: dict[str, str], deps_dts: dict[str, str],
-                    shared_types: str | None, dependents: list[str], retry: dict | None, degraded: bool) -> tuple[str, str]:
+                    shared_types: str | None, dependents: list[str], retry: dict | None, degraded: bool,
+                    npm: dict[str, dict] | None = None) -> tuple[str, str]:
     system = WORKER_SYSTEM.format(module_rules=MODULE_RULES[style], shared_path=shared_path)
     parts = []
     targets = ", ".join(f"`{f}` -> `{ts_name(f)}`" for f in files)
@@ -68,6 +80,15 @@ def worker_messages(*, style: str, shared_path: str, files: dict[str, str], deps
         parts.append("Declarations of the project modules it imports:")
         for path, dts in deps_dts.items():
             parts.append(f"```ts\n// declarations of: {path}\n{dts}\n```")
+    if npm:
+        lines = []
+        for pkg, e in sorted(npm.items()):
+            if e.get("unresolved"):
+                lines.append(f"- {pkg}@{e.get('version')}: no type declarations (type what you use locally)")
+            else:
+                lines.append(f"- {pkg}@{e.get('version')}: types: {', '.join(e['types'][:120]) or '(none)'}; "
+                             f"values (classes here are also types): {', '.join(e['values'][:120]) or '(none)'}")
+        parts.append("npm packages this code imports (installed version, exported names from their type declarations):\n" + "\n".join(lines))
     if shared_types:
         parts.append(f"Shared types file `{shared_path}` (import with `import type`):\n```ts\n{shared_types}\n```")
     if dependents:

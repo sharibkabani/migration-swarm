@@ -42,17 +42,11 @@ def test_degraded_mode_lifts_any_but_never_ts_ignore():
     assert v.escapes["explicit_any"] == 3  # still counted for the report
 
 
-def test_runtime_drift_rejects_removed_code_but_tolerates_reordering_and_interop_lines():
-    original = '"use strict";\nfunction f(n) {\n    return n + 1;\n}\nexports.f = f;\n'
-    reordered = ('"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\n'
-                 'exports.f = void 0;\nexports.f = f;\nfunction f(n) {\n    return n + 1;\n}\n')
-    removed, added, _, _ = drift(original, reordered)
-    assert (removed, added) == (0, 0)
-    gutted = '"use strict";\nfunction f(n) {\n    return 0;\n}\nexports.f = f;\n'
-    d = drift(original, gutted)
-    assert d[0] == 1 and d[1] == 1
+def test_runtime_drift_over_budget_rejects_with_examples():
+    d = drift("return\nn\n+\n1\n", "return\n0\n")
     v = _decide(drifts={"lib/a.ts": d})
-    assert not v.accepted and "runtime code changed" in v.reasons[0] and "return n + 1;" in v.reasons[0]
+    assert not v.accepted and "runtime code changed" in v.reasons[0] and "[n + 1]" in v.reasons[0]
+    assert v.escapes["runtime_removed_tokens"] == 3
 
 
 def test_file_missing_from_program_is_rejected():

@@ -140,7 +140,9 @@ def build(ctx: RunContext, pack) -> StateGraph:
         system, user = await asyncio.to_thread(pack.worker_prompt, ctx, payload["setup"], files, payload["retry"],
                                                payload["degraded"])
         try:
-            r = await ctx.llm.complete(role, system, user, key=uid, model_role=payload["model_role"])
+            size = sum((ctx.workdir / f).stat().st_size for f in files if (ctx.workdir / f).exists())
+            r = await ctx.llm.complete(role, system, user, key=uid, model_role=payload["model_role"],
+                                       expected_output_chars=size or None)
         except BudgetExceeded as e:
             ctx.log(f"budget: {e}")
             return {"candidates": {uid: {"error": "budget"}}, "stop_reason": "budget"}

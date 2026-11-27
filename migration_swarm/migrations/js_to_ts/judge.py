@@ -13,6 +13,7 @@ Per round:
 from __future__ import annotations
 
 import collections
+import difflib
 import json
 import re
 import shutil
@@ -24,15 +25,6 @@ from migration_swarm.core.context import RunContext
 from migration_swarm.migrations.js_to_ts import setup as setup_mod
 from migration_swarm.migrations.js_to_ts.prompts import ts_name
 from migration_swarm.migrations.js_to_ts.testresults import TestResult
-
-# Lines tsc adds to emitted CommonJS that are module-interop plumbing, not program behaviour.
-INTEROP_LINES = [
-    re.compile(r'^"use strict";$'),
-    re.compile(r'^Object\.defineProperty\(exports, "__esModule", \{ value: true \}\);$'),
-    re.compile(r"^exports\.[\w$]+ = (exports\.[\w$]+ = )*void 0;$"),
-    re.compile(r"^export \{\};$"),
-]
-
 
 @dataclass
 class Verdict:
@@ -46,22 +38,24 @@ class Verdict:
         return asdict(self)
 
 
-def normalized_lines(text: str) -> list[str]:
-    out = []
-    for line in text.splitlines():
-        s = line.strip()
-        if s and not any(p.match(s) for p in INTEROP_LINES):
-            out.append(s)
-    return out
-
-
-def drift(original_js: str, candidate_js: str) -> tuple[int, int, list[str], list[str]]:
-    """Multiset line comparison of normalized emitted JS: (removed, added, removed_examples, added_examples)."""
-    a = collections.Counter(normalized_lines(original_js))
-    b = collections.Counter(normalized_lines(candidate_js))
-    removed = a - b
-    added = b - a
-    return sum(removed.values()), sum(added.values()), list(removed)[:8], list(added)[:8]
+def drift(original_tokens: str, candidate_tokens: str) -> tuple[int, int, list[str], list[str]]:
+    """Token-level diff of canonical emitted JS (see judge.mjs): (removed, added, removed_examples, added_examples)."""
+    a = [t for t in original_tokens.splitlines() if t]
+    b = [t for t in candidate_tokens.splitlines() if t]
+    removed = added = 0
+    rex: list[str] = []
+    aex: list[str] = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            continue
+        removed += i2 - i1
+        added += j2 - j1
+        ctx_before = " ".join(a[max(i1 - 4, 0):i1])
+        if i2 > i1 and len(rex) < 6:
+            rex.append(f"...{ctx_before} [{' '.join(a[i1:i2])[:200]}]")
+        if j2 > j1 and len(aex) < 6:
+            aex.append(f"...{ctx_before} [{' '.join(b[j1:j2])[:200]}]")
+    return removed, added, rex, aex
 
 
 def decide(*, unit_files: list[str], diagnostics: list[dict], escapes: dict[str, dict], drifts: dict[str, tuple],
@@ -86,12 +80,14 @@ def decide(*, unit_files: list[str], diagnostics: list[dict], escapes: dict[str,
         sites += [{**s, "file": f} for s in e.get("sites", [])]
         if f in drifts:
             removed, added, rex, aex = drifts[f]
-            totals["runtime_removed_lines"] += removed
-            totals["runtime_added_lines"] += added
-            if removed > budgets.get("runtime_removed_lines", 0):
-                reasons.append(f"{f}: runtime code changed; original emitted lines missing from yours: " + " || ".join(rex))
-            if added > budgets.get("runtime_added_lines", 0):
-                reasons.append(f"{f}: {added} runtime lines added that the original did not have, e.g.: " + " || ".join(aex))
+            totals["runtime_removed_tokens"] += removed
+            totals["runtime_added_tokens"] += added
+            if removed > budgets.get("runtime_removed_tokens", 0):
+                reasons.append(f"{f}: runtime code changed ({removed} tokens of the original's compiled JS are missing or "
+                               f"altered; only types may be added). Original tokens [in brackets] not in yours: " + " || ".join(rex)
+                               + (" -- yours has instead: " + " || ".join(aex) if aex else ""))
+            elif added > budgets.get("runtime_added_tokens", 0):
+                reasons.append(f"{f}: {added} runtime tokens added that the original did not have: " + " || ".join(aex))
     for kind, n in sorted(totals.items()):
         if kind.startswith("runtime_") or kind in lifted:
             continue
@@ -164,6 +160,11 @@ def judge_round(ctx: RunContext, *, setup_info: dict, unit_files: dict[str, list
                                budgets=cfg_budgets, lifted=lifted_degraded if cand.get("degraded") else set(),
                                sources=cand["files"])
 
+    # Statically rejected units go back to their original .js now, so the test tree is consistent.
+    for uid, v in verdicts.items():
+        if not v.accepted:
+            revert_unit(ctx, commit, unit_files[uid])
+
     # Tests on the shadow build, for units that passed the static checks.
     testable = [uid for uid, v in verdicts.items() if v.accepted]
     emit_dir = ctx.run_dir / "emit"
@@ -228,7 +229,7 @@ def judge_round(ctx: RunContext, *, setup_info: dict, unit_files: dict[str, list
             v.reasons.append(f"protected test files were modified: {changed[:5]}")
 
     for uid, v in verdicts.items():
-        if not v.accepted:
+        if not v.accepted and any((ctx.workdir / ts_name(f)).exists() for f in unit_files[uid]):
             revert_unit(ctx, commit, unit_files[uid])
     accepted_now = [uid for uid, v in verdicts.items() if v.accepted]
     if accepted_now:
@@ -274,7 +275,7 @@ def judge_steward(ctx: RunContext, setup_info: dict, content: str) -> list[str]:
         if counts.get(k):
             reasons.append(f"{k} is not allowed in the shared types file")
     norm = ctx.run_dir / "cand_norm" / re.sub(r"\.ts$", ".js", path)
-    if norm.exists() and normalized_lines(norm.read_text()):
+    if norm.exists() and norm.read_text().strip():
         reasons.append("the shared types file must not contain runtime code (its emitted JS is not empty)")
     if reasons:
         if previous is None:

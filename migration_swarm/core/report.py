@@ -22,15 +22,18 @@ def build(ctx: RunContext, pack, state: dict) -> dict:
     files = []
     status_count: collections.Counter = collections.Counter()
     escapes: collections.Counter = collections.Counter()
+    escapes_degraded: collections.Counter = collections.Counter()
     retries = []
     escalated = 0
     for uid, u in sorted(units.items()):
         st = u["status"]
         if st == "pending":
-            st = "not_reached"
+            st = "stopped_mid_retry" if u.get("attempts") else "not_reached"
         status_count[st] += len(unit_files.get(uid, [uid]))
-        if st in ("accepted", "degraded"):
+        if st == "accepted":
             escapes.update(u.get("escapes", {}))
+        elif st == "degraded":
+            escapes_degraded.update(u.get("escapes", {}))
         attempts = u.get("attempts", 0)
         retries.append(max(attempts - 1, 0))
         if attempts > escalation_n:
@@ -67,6 +70,7 @@ def build(ctx: RunContext, pack, state: dict) -> dict:
             "degraded_files": status_count.get("degraded", 0),
             "escapes": {k: escapes.get(k, 0) for k in pack.ESCAPE_KEYS},
             "escapes_per_kloc": {k: round(escapes.get(k, 0) / kloc, 3) for k in pack.ESCAPE_KEYS},
+            "escapes_degraded": {k: escapes_degraded.get(k, 0) for k in pack.ESCAPE_KEYS},
         },
         "final": final,
         "cost": {**cost, "usd_per_kloc": round(cost["spent_usd"] / kloc, 4)},
@@ -103,8 +107,10 @@ def render_md(r: dict) -> str:
                   f"- tests on the migrated code: passed {t['passed']}, failed {t['failed']}, skipped {t['skipped']}  ·  "
                   f"matches baseline: **{fin['tests_match_baseline']}**",
                   f"- protected test files changed: {fin['protected_changed'] or 'none'}", ""]
-    lines += ["## Escapes (accepted files)", "", "| escape | count | per kLOC |", "|---|---:|---:|",
-              *[f"| {k} | {v} | {res['escapes_per_kloc'][k]} |" for k, v in res["escapes"].items()], ""]
+    deg = res.get("escapes_degraded", {})
+    lines += ["## Escapes", "", "Per kLOC is over the whole repo. Degraded files had some budgets lifted and are counted separately.", "",
+              "| escape | accepted files | per kLOC | degraded files |", "|---|---:|---:|---:|",
+              *[f"| {k} | {v} | {res['escapes_per_kloc'][k]} | {deg.get(k, 0)} |" for k, v in res["escapes"].items()], ""]
     problem = [f for f in r["files"] if f["status"] not in ("accepted",)]
     if problem:
         lines += ["## Files needing attention", ""]

@@ -30,6 +30,7 @@ class Analysis:
     cycles: list[list[str]]
     shared: list[str]
     fan_in: dict[str, int] = field(default_factory=dict)
+    file_externals: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def total_loc(self) -> int:
@@ -104,12 +105,14 @@ def analyze(ctx: RunContext) -> Analysis:
     edges: dict[str, list[str]] = {}
     module_system: dict[str, str] = {}
     externals: set[str] = set()
+    file_externals: dict[str, list[str]] = {}
     builtins = False
     for m in data["modules"]:
         src = m["source"]
         if src not in fileset:
             continue
         deps = set()
+        ext = set()
         systems = set()
         for d in m.get("dependencies", []):
             systems.add(d.get("moduleSystem", ""))
@@ -119,7 +122,9 @@ def analyze(ctx: RunContext) -> Analysis:
                 deps.add(d["resolved"])
             elif any(t.startswith("npm") for t in d.get("dependencyTypes", [])):
                 externals.add(package_name(d["module"]))
+                ext.add(package_name(d["module"]))
         edges[src] = sorted(deps)
+        file_externals[src] = sorted(ext)
         module_system[src] = "es6" if "es6" in systems else "cjs" if "cjs" in systems else "unknown"
 
     loc = {f: count_loc((ctx.workdir / f).read_text(errors="replace")) for f in files}
@@ -129,7 +134,7 @@ def analyze(ctx: RunContext) -> Analysis:
             fan_in[d] += 1
     cycles = [c for c in strongly_connected_components(files, {k: set(v) for k, v in edges.items()}) if len(c) > 1]
     shared = sorted(f for f in files if fan_in[f] >= 3 or SHARED_NAME_RE.search(f))
-    a = Analysis(files, edges, loc, module_system, sorted(externals), builtins, cycles, shared, fan_in)
+    a = Analysis(files, edges, loc, module_system, sorted(externals), builtins, cycles, shared, fan_in, file_externals)
     (ctx.run_dir / "analysis.json").write_text(json.dumps(a.to_json(), indent=1))
     return a
 

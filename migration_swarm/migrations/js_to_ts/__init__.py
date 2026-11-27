@@ -12,7 +12,7 @@ from migration_swarm.migrations.js_to_ts import setup as setup_mod
 NAME = "js-to-ts"
 DESCRIPTION = "JavaScript -> strict TypeScript (in place, file by file, tests unchanged)"
 ESCAPE_KEYS = ["explicit_any", "implicit_any", "ts_ignore", "ts_expect_error", "ts_nocheck", "as_unknown_as",
-               "non_null_assertion", "as_cast", "runtime_removed_lines", "runtime_added_lines"]
+               "non_null_assertion", "as_cast", "runtime_removed_tokens", "runtime_added_tokens"]
 
 
 def detect_repo_spec(repo: Path, source_dirs: list[str] | None = None) -> RepoSpec:
@@ -55,7 +55,9 @@ def worker_prompt(ctx: RunContext, setup_info: dict, unit_files: list[str], retr
         files={f: ctx.git("show", f"{setup_info['setup_commit']}:{f}") + "\n" for f in unit_files},
         deps_dts=judge_mod.deps_declarations(ctx, deps),
         shared_types=shared.read_text() if shared.exists() else None,
-        dependents=dependents, retry=retry, degraded=degraded)
+        dependents=dependents, retry=retry, degraded=degraded,
+        npm=({p: setup_info["npm_exports"].get(p, {"unresolved": True})
+              for f in unit_files for p in a.file_externals.get(f, [])} if "npm_exports" in setup_info else None))
 
 
 def parse_worker_output(text: str, unit_files: list[str]):

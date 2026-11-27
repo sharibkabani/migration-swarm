@@ -2,6 +2,7 @@
 //
 // Input: path to a JSON request file:
 //   { project, outDir, buildInfo, emit, escapeFiles: [rel .ts paths], normalize: [rel .js paths under outDir], normDir, result }
+// normalize: emitted .js files are written to normDir as canonical token streams (one token per line).
 // Output: JSON written to `result`:
 //   { diagnostics: [{file, line, col, code, message}], escapes: {file: {counts, sites}}, emitted: [rel paths] }
 //
@@ -58,12 +59,13 @@ const all = [
 ];
 const emitted = [];
 if (req.emit) {
-  const res = program.emit(undefined, (fileName, text) => {
+  // Emit diagnostics are not counted: they come from the .d.ts emit we add for worker context
+  // (e.g. TS9005 on not-yet-migrated JS), not from the code's type correctness.
+  program.emit(undefined, (fileName, text) => {
     fs.mkdirSync(path.dirname(fileName), { recursive: true });
     fs.writeFileSync(fileName, text);
     emitted.push(path.relative(req.outDir, fileName).split(path.sep).join("/"));
   });
-  all.push(...res.diagnostics);
 }
 
 const diagnostics = all
@@ -153,15 +155,87 @@ for (const f of req.escapeFiles || []) {
   escapes[f] = countEscapes(sf, diagnostics.filter((d) => d.file === f));
 }
 
-// Normalized runtime JS for drift comparison: reprint emitted JS without comments.
-const printer = ts.createPrinter({ removeComments: true, newLine: ts.NewLineKind.LineFeed });
+// Canonical runtime token stream of emitted JS, for drift comparison against the original.
+// Leaf tokens of the AST (comments and whitespace are not tokens), with CommonJS export plumbing
+// folded so that equivalent export forms compare equal:
+//   dropped statements: "use strict", Object.defineProperty(exports, "__esModule", ...),
+//                       exports.a = exports.b = void 0, exports.X = X, export {}
+//   rewrites: module.exports.X / exports.X / (0, exports.X) -> X ; `function X (` -> `X = function (` ;
+//             const/let/var and `;` dropped. Applied identically to both sides.
+function leafTokens(node, sf, out) {
+  const kids = node.getChildren(sf);
+  if (kids.length === 0) {
+    if (node.kind === ts.SyntaxKind.EndOfFileToken) return;
+    out.push(ts.isStringLiteral(node) ? JSON.stringify(node.text) : node.getText(sf));
+    return;
+  }
+  for (const k of kids) {
+    // JSDoc is parsed into nodes for JS files; it is a comment, not runtime code.
+    if (k.kind >= ts.SyntaxKind.FirstJSDocNode && k.kind <= ts.SyntaxKind.LastJSDocNode) continue;
+    leafTokens(k, sf, out);
+  }
+}
+function isPlumbing(toks) {
+  const s = toks.join(" ");
+  return s === '"use strict" ;' || s === '"use strict"' || s === "export { } ;" ||
+    s.startsWith('Object . defineProperty ( exports , "__esModule"') ||
+    /^exports \. [\w$]+ = (exports \. [\w$]+ = )*void 0 ;?$/.test(s) ||
+    /^exports \. ([\w$]+) = \1 ;?$/.test(s);
+}
+function canonicalTokens(text) {
+  const sf = ts.createSourceFile("x.js", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const toks = [];
+  for (const st of sf.statements) {
+    const t = [];
+    leafTokens(st, sf, t);
+    if (!isPlumbing(t)) toks.push(...t);
+  }
+  const out = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t === "module" && toks[i + 1] === "." && toks[i + 2] === "exports" && toks[i + 3] === ".") { i += 1; continue; }
+    if (t === "(" && toks[i + 1] === "0" && toks[i + 2] === "," && toks[i + 3] === "exports" && toks[i + 4] === "." && toks[i + 6] === ")") {
+      out.push(toks[i + 5]); i += 6; continue;
+    }
+    if (t === "exports" && toks[i + 1] === "." && /^[\w$]+$/.test(toks[i + 2] || "")) { out.push(toks[i + 2]); i += 2; continue; }
+    if (t === "function" && /^[\w$]+$/.test(toks[i + 1] || "") && toks[i + 2] === "(") { out.push(toks[i + 1], "=", "function"); i += 1; continue; }
+    if (t === "const" || t === "let" || t === "var" || t === ";") continue;
+    out.push(t);
+  }
+  return out;
+}
 for (const f of req.normalize || []) {
   const src = path.join(req.outDir, f);
   if (!fs.existsSync(src)) continue;
-  const sf = ts.createSourceFile(src, fs.readFileSync(src, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
   const dest = path.join(req.normDir, f);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, printer.printFile(sf));
+  fs.writeFileSync(dest, canonicalTokens(fs.readFileSync(src, "utf8")).join("\n") + "\n");
 }
 
-fs.writeFileSync(req.result, JSON.stringify({ diagnostics, escapes, emitted }));
+// Exported names of npm packages, from their installed type declarations (so workers do not guess).
+const packageExports = {};
+if ((req.listExports || []).length) {
+  const roots = {};
+  for (const spec of req.listExports) {
+    const r = ts.resolveModuleName(spec, path.join(projectDir, "__msw_probe__.ts"), parsed.options, ts.sys);
+    const f = r.resolvedModule && r.resolvedModule.resolvedFileName;
+    if (f && /\.d\.[cm]?ts$/.test(f)) roots[spec] = f;
+    else packageExports[spec] = { unresolved: true };
+  }
+  const p2 = ts.createProgram(Object.values(roots), { ...parsed.options, noEmit: true });
+  const checker = p2.getTypeChecker();
+  for (const [spec, f] of Object.entries(roots)) {
+    const sf = p2.getSourceFile(f);
+    const sym = sf && checker.getSymbolAtLocation(sf);
+    if (!sym) { packageExports[spec] = { unresolved: true }; continue; }
+    const types = [], values = [];
+    for (const e of checker.getExportsOfModule(sym)) {
+      const t = e.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(e) : e;
+      if (t.flags & ts.SymbolFlags.Value) values.push(e.name);
+      else if (t.flags & ts.SymbolFlags.Type) types.push(e.name);
+    }
+    packageExports[spec] = { types: types.sort(), values: values.sort() };
+  }
+}
+
+fs.writeFileSync(req.result, JSON.stringify({ diagnostics, escapes, emitted, packageExports }));

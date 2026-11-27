@@ -45,8 +45,8 @@ escape_budgets:
   as_unknown_as: 0
   non_null_assertion: 5
   as_cast: 5
-  runtime_removed_lines: 0
-  runtime_added_lines: 10
+  runtime_removed_tokens: 0   # tokens of the original's compiled JS that are missing/altered
+  runtime_added_tokens: 40    # e.g. a small narrowing guard
 # Budgets lifted (set to unlimited) for the final "degraded" attempt. @ts-ignore/@ts-nocheck never are.
 degraded_lifts: [explicit_any, as_cast, non_null_assertion, as_unknown_as]
 
