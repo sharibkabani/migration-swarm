@@ -5,7 +5,8 @@ description: Migrate a codebase with migration-swarm (currently JavaScript -> st
 
 # Migrating a codebase with migration-swarm
 
-migration-swarm runs parallel LLM agents (one file each) through the repo's import graph. A
+migration-swarm runs parallel LLM agents, one per file. Each file starts as soon as the files it imports
+are done. A
 deterministic judge accepts or rejects every file:
 
 - strict `tsc` with zero errors;
@@ -33,7 +34,7 @@ migration-swarm.
    every 30 seconds until `phase` is `awaiting_approval`. The first run builds Docker images and
    installs dependencies, which can take several minutes.
 4. **Show the plan and ask.** From `get_status(...).plan`, show:
-   - file count and lines of code, and the layers with their files (abbreviate long lists);
+   - file count and lines of code, and the import-depth groups with their files (abbreviate long lists);
    - the model for each role;
    - the budget and the `estimate_usd` range, plus `billing`;
    - the test command;
@@ -41,8 +42,8 @@ migration-swarm.
 
    Ask the user to approve. Never approve on your own.
 5. **Run.** On approval, call `approve_plan(run_id)`. If they decline, call `cancel(run_id)`.
-6. **Watch.** Poll `get_status` every minute or two, and relay meaningful changes briefly: layer
-   progress, accepted/rejected files with the reason, spend. Runs take minutes to hours. If the user
+6. **Watch.** Poll `get_status` every minute or two, and relay meaningful changes briefly: files
+   done, accepted/rejected files with the reason, spend. Runs take minutes to hours. If the user
    wants to do something else, tell them the `run_id` and that they can ask for status later.
    - A `plan_wait` event means the Claude plan's usage limit was hit; the run resumes on its own
      after the reset.

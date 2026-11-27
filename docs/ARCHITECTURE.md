@@ -305,3 +305,18 @@ from plan limits when signed in with a plan. Direct Messages API calls are not c
     calls.
   - A crash while a unit is mid-attempt redoes that attempt on resume. Spend is persisted after
     every call, so the budget stays exact.
+
+## 10. Dependency-driven scheduling (2026-11-27)
+
+- **Graph:** `analyze → plan → setup → migrate → finalize → report`.
+- **Scheduling:** `migrate` is one async scheduler. Each unit waits only for the units it imports,
+  not for a whole layer, then runs its ladder; at most `concurrency` units run at once. Layers
+  remain only as import depth (shown in the plan; also used for the judge's log labels).
+- **Steward:** a unit's shared-type requests are merged right after it is accepted, serialized,
+  and before anything that imports it starts.
+- **Resume:** unit progress is saved to `units.json` after every verdict. Resume re-enters
+  `migrate`, skips finished units and keeps pending units' attempts. An attempt that was in flight
+  is redone.
+- **Test:** `tests/test_scheduler.py` makes the `a↔b` cycle slow and checks that `format.js`,
+  which only imports `constants.js`, starts before the cycle is resolved. Under layers it couldn't
+  have.

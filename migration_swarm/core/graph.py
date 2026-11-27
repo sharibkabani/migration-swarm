@@ -1,7 +1,10 @@
 """The run graph (LangGraph). Core orchestration only; every migration-specific step is a pack call.
 
-analyze -> plan -> setup -> [dispatch -> worker x N (parallel, Send) -> judge]* per layer -> steward
-        -> ... next layer ... -> finalize -> report
+analyze -> plan -> setup -> migrate -> finalize -> report
+
+migrate schedules units by dependency: a unit starts once every unit it imports is resolved (up to
+`concurrency` at once) and runs its own ladder; shared-type requests are merged by the steward before the
+requesting unit's dependents start. Progress is saved per unit (units.json) so a resume continues mid-migration.
 
 Retry/escalation ladder per unit (attempt index a, N = retries_before_escalation):
   a <= N      worker model (initial try + N retries), with the exact rejection reasons
@@ -20,29 +23,12 @@ import time
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
 
 from migration_swarm.core import planner, report as report_mod, runs
 from migration_swarm.core.budget import BudgetExceeded, TokenCapExceeded
 from migration_swarm.core import plansummary
 from migration_swarm.core.plan_llm import PlanLimitReached
 from migration_swarm.core.context import RunContext
-
-RESET = {"__reset__": True}
-
-
-def merge_dict(a: dict | None, b: dict | None) -> dict:
-    if b == RESET:
-        return {}
-    return {**(a or {}), **(b or {})}
-
-
-def merge_list(a: list | None, b: list | None) -> list:
-    if b and b[0] == RESET:
-        return []
-    return [*(a or []), *(b or [])]
-
-
 
 def first_set(a: Any, b: Any) -> Any:
     return a if a else b
@@ -53,10 +39,7 @@ class RunState(TypedDict, total=False):
     layers: list[list[str]]
     unit_files: dict[str, list[str]]
     units: dict[str, dict]
-    layer_idx: int
     setup: dict
-    candidates: Annotated[dict, merge_dict]
-    steward_requests: Annotated[list, merge_list]
     steward_log: Annotated[list, operator.add]
     stop_reason: Annotated[str | None, first_set]
     final: dict
@@ -105,7 +88,7 @@ def build(ctx: RunContext, pack) -> StateGraph:
         status(phase="plan", layers=len(layers), units=len(unit_files))
         ctx.emit("phase", phase="plan", detail=f"{len(unit_files)} units in {len(layers)} layers")
         plansummary.write(ctx, plansummary.build(ctx, a, [[u.id for u in l] for l in layers], unit_files))
-        return {"layers": [[u.id for u in l] for l in layers], "unit_files": unit_files, "units": units, "layer_idx": 0}
+        return {"layers": [[u.id for u in l] for l in layers], "unit_files": unit_files, "units": units}
 
     def setup_node(state: RunState) -> dict:
         status(phase="setup")
@@ -118,27 +101,12 @@ def build(ctx: RunContext, pack) -> StateGraph:
             return {"setup": {"error": str(e)}, "stop_reason": "setup_failed"}
         return {"setup": info}
 
-    def dispatch_node(state: RunState) -> dict:
-        k = state["layer_idx"]
-        status(phase="migrate", layer=k, layer_count=len(state["layers"]))
-        ctx.emit("layer", index=k, count=len(state["layers"]), units=len(state["layers"][k]))
-        return {"candidates": RESET}
-
-    # Each unit runs its own ladder (write -> judge -> retry) inside one worker task, so a unit never waits
-    # for the slowest unit of its layer between attempts. Judging edits the shared clone, so it is serialized.
+    # Dependency-driven scheduling: every unit starts as soon as the units it imports are resolved (not when
+    # a whole layer is), and runs its own ladder (write -> judge -> retry -> escalate). Judging edits the shared
+    # clone, so it is serialized; so is the steward, which rewrites the shared types file.
     judge_lock = asyncio.Lock()
-    status_of: dict[str, str] = {}  # live unit statuses while a layer runs (shared by its worker tasks)
-
-    def fan_out(state: RunState):
-        if state.get("stop_reason"):
-            return "finalize"
-        k = state["layer_idx"]
-        statuses = {uid: u["status"] for uid, u in state["units"].items()}
-        # statuses travel in the payload: on resume, pending Sends come back from the checkpoint without fan_out
-        sends = [Send("worker", {"uid": uid, "unit": state["units"][uid], "layer": k, "unit_files": state["unit_files"],
-                                 "setup": state["setup"], "statuses": statuses})
-                 for uid in state["layers"][k] if state["units"][uid]["status"] == "pending"]
-        return sends or "judge"
+    steward_lock = asyncio.Lock()
+    status_of: dict[str, str] = {}
 
     async def attempt(uid: str, files: list[str], setup: dict, n: int, model_role: str, degraded: bool,
                       retry: dict | None) -> dict:
@@ -212,80 +180,106 @@ def build(ctx: RunContext, pack) -> StateGraph:
 
     setup_of: dict = {}
 
-    async def worker_node(payload: dict) -> dict:
-        uid, k, unit_files = payload["uid"], payload["layer"], payload["unit_files"]
-        setup_of["setup"] = payload["setup"]
-        for x, st in payload["statuses"].items():
-            status_of.setdefault(x, st)
-        u, requests = dict(payload["unit"]), []
-        while u["status"] == "pending" and (step := ladder(u["attempts"], n_retries)) is not None:
-            last = u["history"][-1] if u["history"] else None
-            retry = {"reasons": last["reasons"], "previous": last.get("output_files")} if last else None
-            c = await attempt(uid, unit_files[uid], payload["setup"], u["attempts"], step[0], step[1], retry)
-            if c.get("error") in ("budget", "cancelled", "plan_limit"):  # not an attempt; the unit stays pending
-                return {"candidates": {uid: {"unit": u, "requests": requests}}, "stop_reason": c["error"]}
-            async with judge_lock:
-                accepted = [x for x, st in status_of.items() if st in ("accepted", "degraded")]
-                u, new = await asyncio.to_thread(settle, uid, u, c, unit_files, k, accepted)
-                status_of[uid] = u["status"]
-                counts = collections.Counter(status_of.values())
-                status(phase="migrate", layer=k, units_done=len(status_of) - counts["pending"],
-                       units_by_status={st: counts[st] for st in ("pending", "accepted", "degraded", "failed")})
-            requests += new
-        return {"candidates": {uid: {"unit": u, "requests": requests}}}
-
-    def judge_node(state: RunState) -> dict:
-        """Collect the layer's finished units (each was judged inside its own worker task)."""
-        k = state["layer_idx"]
-        units = {uid: dict(u) for uid, u in state["units"].items()}
-        requests: list = []
-        for uid, c in (state.get("candidates") or {}).items():
-            units[uid] = c["unit"]
-            requests += c["requests"]
-        done = sum(1 for u in units.values() if u["status"] != "pending")
-        status(phase="migrate", layer=k, units_done=done,
-               units_by_status={s: sum(1 for u in units.values() if u["status"] == s)
-                                for s in ("pending", "accepted", "degraded", "failed")})
-        return {"units": units, "steward_requests": requests}
-
-    def after_judge(state: RunState) -> str:
-        if state.get("stop_reason"):
-            return "finalize"
-        k = state["layer_idx"]
-        if any(state["units"][uid]["status"] == "pending" for uid in state["layers"][k]):
-            return "dispatch"
-        return "steward"
-
-    async def steward_node(state: RunState) -> dict:
-        reqs = state.get("steward_requests") or []
+    async def steward_step(setup: dict, reqs: list, uid: str) -> tuple[list, str | None]:
+        """Merge one unit's shared-type requests before anything that imports it starts. -> (log, stop reason)."""
         log: list = []
-        if reqs and not state.get("stop_reason"):
-            reasons = None
+        reasons = None
+        async with steward_lock:
             ctx.emit("agent_start", agent="__steward__", role="steward", unit="shared types", files=[],
                      model=ctx.llm.model_for("steward"), attempt=0, degraded=False)
-            for attempt in range(2):
-                system, user = pack.steward_prompt(ctx, state["setup"], reqs, reasons)
+            for n in range(2):
+                system, user = pack.steward_prompt(ctx, setup, reqs, reasons)
                 try:
                     r = await ctx.llm.complete("steward", system, user, key="__steward__")
                 except BudgetExceeded as e:
                     ctx.log(f"budget: {e}")
-                    return {"stop_reason": "plan_limit" if isinstance(e, PlanLimitReached) else "budget",
-                            "steward_requests": [RESET]}
-                reasons = await asyncio.to_thread(pack.apply_steward, ctx, state["setup"], r.text)
-                log.append({"layer": state["layer_idx"], "attempt": attempt, "requests": len(reqs), "rejected": reasons})
+                    ctx.emit("agent_done", agent="__steward__", unit="shared types", error="budget")
+                    return log, "plan_limit" if isinstance(e, PlanLimitReached) else "budget"
+                async with judge_lock:
+                    reasons = await asyncio.to_thread(pack.apply_steward, ctx, setup, r.text)
+                log.append({"for": uid, "attempt": n, "requests": len(reqs), "rejected": reasons})
                 if not reasons:
-                    ctx.log(f"steward: merged {len(reqs)} shared-type requests")
+                    ctx.log(f"steward: merged {len(reqs)} shared-type requests from {uid}")
                     break
             else:
-                ctx.log(f"steward: gave up on {len(reqs)} requests: {reasons[:3]}")
+                ctx.log(f"steward: gave up on {len(reqs)} requests from {uid}: {reasons[:3]}")
             ctx.emit("agent_done", agent="__steward__", unit="shared types", error=None if not reasons else "rejected")
             ctx.emit("steward", requests=len(reqs), rejected=(reasons or [])[:3])
-        return {"steward_requests": [RESET], "steward_log": log, "layer_idx": state["layer_idx"] + 1}
+        return log, None
 
-    def after_steward(state: RunState) -> str:
-        if state.get("stop_reason") or state["layer_idx"] >= len(state["layers"]):
-            return "finalize"
-        return "dispatch"
+    async def migrate_node(state: RunState) -> dict:
+        setup, unit_files = state["setup"], state["unit_files"]
+        setup_of["setup"] = setup
+        units = {uid: dict(u) for uid, u in state["units"].items()}
+        saved = ctx.run_dir / "units.json"
+        if saved.exists():  # resuming mid-migration: keep every unit's progress (accepted work is in git)
+            units.update(json.loads(saved.read_text()))
+        file_unit = {f: uid for uid, fs in unit_files.items() for f in fs}
+        edges = state["analysis"]["edges"]
+        deps = {uid: {file_unit[d] for f in fs for d in edges.get(f, []) if file_unit.get(d, uid) != uid}
+                for uid, fs in unit_files.items()}
+        status_of.clear()
+        status_of.update({uid: u["status"] for uid, u in units.items()})
+        resolved = {uid: asyncio.Event() for uid in units}
+        for uid, u in units.items():
+            if u["status"] != "pending":
+                resolved[uid].set()
+        sem = asyncio.Semaphore(int(ctx.cfg["concurrency"]))
+        stop: dict = {"reason": None}
+        steward_log: list = []
+
+        def save() -> None:
+            saved.write_text(json.dumps(units))
+            counts = collections.Counter(status_of.values())
+            status(phase="migrate", units_done=len(status_of) - counts["pending"],
+                   units_by_status={st: counts[st] for st in ("pending", "accepted", "degraded", "failed")})
+
+        def halt(reason: str) -> None:
+            stop["reason"] = stop["reason"] or reason
+            for ev in resolved.values():  # wake units waiting on imports; they see the stop and return
+                ev.set()
+
+        async def run_unit(uid: str) -> None:
+            for d in deps[uid]:
+                await resolved[d].wait()
+            requests: list = []
+            async with sem:
+                u = units[uid]
+                while not stop["reason"] and u["status"] == "pending" and (step := ladder(u["attempts"], n_retries)):
+                    last = u["history"][-1] if u["history"] else None
+                    retry = {"reasons": last["reasons"], "previous": last.get("output_files")} if last else None
+                    c = await attempt(uid, unit_files[uid], setup, u["attempts"], step[0], step[1], retry)
+                    if c.get("error") in ("budget", "cancelled", "plan_limit"):  # not an attempt; unit stays pending
+                        halt(c["error"])
+                        return
+                    async with judge_lock:
+                        accepted = [x for x, st in status_of.items() if st in ("accepted", "degraded")]
+                        u, new = await asyncio.to_thread(settle, uid, u, c, unit_files, u.get("layer", 0), accepted)
+                        units[uid] = u
+                        status_of[uid] = u["status"]
+                        save()
+                    requests += new
+            if stop["reason"]:
+                return
+            if requests:
+                log, why = await steward_step(setup, requests, uid)
+                steward_log.extend(log)
+                if why:
+                    halt(why)
+                    return
+            resolved[uid].set()
+
+        ctx.emit("phase", phase="migrate", detail=f"{len(units)} units; each starts when the files it imports are done")
+        save()
+        tasks = [asyncio.create_task(run_unit(uid)) for uid, u in units.items() if u["status"] == "pending"]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return {"units": units, "steward_log": steward_log, "stop_reason": stop["reason"]}
 
     def finalize_node(state: RunState) -> dict:
         status(phase="finalize")
@@ -305,20 +299,14 @@ def build(ctx: RunContext, pack) -> StateGraph:
     g.add_node("analyze", analyze_node)
     g.add_node("plan", plan_node)
     g.add_node("setup", setup_node)
-    g.add_node("dispatch", dispatch_node)
-    g.add_node("worker", worker_node)
-    g.add_node("judge", judge_node)
-    g.add_node("steward", steward_node)
+    g.add_node("migrate", migrate_node)
     g.add_node("finalize", finalize_node)
     g.add_node("report", report_node)
     g.add_edge(START, "analyze")
     g.add_edge("analyze", "plan")
     g.add_edge("plan", "setup")
-    g.add_conditional_edges("setup", lambda s: "finalize" if s.get("stop_reason") else "dispatch", ["finalize", "dispatch"])
-    g.add_conditional_edges("dispatch", fan_out, ["worker", "judge", "finalize"])
-    g.add_edge("worker", "judge")
-    g.add_conditional_edges("judge", after_judge, ["dispatch", "steward", "finalize"])
-    g.add_conditional_edges("steward", after_steward, ["dispatch", "finalize"])
+    g.add_conditional_edges("setup", lambda s: "finalize" if s.get("stop_reason") else "migrate", ["finalize", "migrate"])
+    g.add_edge("migrate", "finalize")
     g.add_edge("finalize", "report")
     g.add_edge("report", END)
     return g
@@ -357,7 +345,7 @@ async def execute(ctx: RunContext, pack, *, resume: bool = False, approve=None) 
             return snap.values
         async for past in app.aget_state_history(config):
             if past.next and not set(past.next) & {"finalize", "report"} and not past.values.get("stop_reason"):
-                ctx.log(f"resume: rewinding past '{snap.values['stop_reason']}' stop to {past.next} in layer {past.values.get('layer_idx')}")
+                ctx.log(f"resume: rewinding past '{snap.values['stop_reason']}' stop to {past.next}")
                 fork = {**config, "configurable": {**config["configurable"], **past.config["configurable"]}}
                 return await app.ainvoke(None, config=fork)
         raise RuntimeError("no checkpoint to resume from")

@@ -178,10 +178,10 @@ def plan_view(it: intent_mod.Intent, state: dict, cfg: dict, ctx, repo: Path) ->
     facts.add_row("scope", f"{len(a['files'])} files · {a['total_loc']:,} lines in {', '.join(ctx.repo.source_dirs)}"
                   + (f" · {len(a['cycles'])} import cycle{'s' if len(a['cycles']) != 1 else ''} (each handled as one unit)"
                      if a["cycles"] else ""))
-    facts.add_row("order", f"{len(layers)} layers through the import graph, leaves first; up to {cfg['concurrency']} agents at once")
+    facts.add_row("order", f"each file starts as soon as the files it imports are done; up to {cfg['concurrency']} agents at once")
 
     lt = Table(box=box.SIMPLE_HEAD, show_edge=False, pad_edge=False, header_style=DIM)
-    lt.add_column("layer", justify="right", style=DIM)
+    lt.add_column("depth", justify="right", style=DIM)
     lt.add_column("units", justify="right")
     lt.add_column("files")
     for k, layer in enumerate(layers):
@@ -317,7 +317,9 @@ class Dashboard:
         g.add_column(ratio=1)
         g.add_column(justify="right", no_wrap=True)
         phase = PHASE_LABEL.get(self.phase, self.phase)
-        layer = f"  ·  layer {self.layer[0]}/{self.layer[1]}" if self.layer[1] and self.phase == "migrate" else ""
+        running = sum(1 for a in self.agents.values() if a["state"] in ("thinking", "writing", "judging"))
+        layer = (f"  ·  layer {self.layer[0]}/{self.layer[1]}" if self.layer[1] else f"  ·  {running} agents running"
+                 ) if self.phase == "migrate" else ""
         g.add_row("", Text.assemble((phase, f"bold {ACCENT}"), (layer, ""), (f"  {self.detail}" if self.phase != "migrate" else "", DIM)),
                   Text(f"{el // 60:02d}:{el % 60:02d}", style=DIM))
         g.add_row("files", ProgressBar(total=total, completed=done, width=None, complete_style=OK, finished_style=OK),
@@ -339,7 +341,10 @@ class Dashboard:
         t.add_column(no_wrap=True, style=DIM, width=24, overflow="ellipsis")
         t.add_column(no_wrap=True, width=12)
         t.add_column(ratio=1, no_wrap=True, overflow="ellipsis", style=DIM)
-        rows = sorted(self.agents.items(), key=lambda kv: kv[1]["t0"])[-12:]
+        active = ("thinking", "writing", "judging", "done")
+        live = sorted((kv for kv in self.agents.items() if kv[1]["state"] in active), key=lambda kv: kv[1]["t0"])
+        ended = sorted((kv for kv in self.agents.items() if kv[1]["state"] not in active), key=lambda kv: kv[1]["t0"])
+        rows = live[-12:] + ended[-max(0, 12 - len(live)):] if len(live) < 12 else live[-12:]
         for _, a in rows:
             st = a["state"]
             if st == "thinking":
