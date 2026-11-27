@@ -140,6 +140,27 @@ def cancel(run_id: str) -> None:
     typer.echo("cancel requested")
 
 
+@app.command("eval")
+def eval_cmd(
+    migration: str = typer.Option(..., "--migration", "-m"),
+    manifest: Path = typer.Option(..., help="Benchmark manifest (YAML)."),
+    systems: str = typer.Option("all", help="Comma-separated systems, or 'all'."),
+    runs: int = typer.Option(3, help="Runs per (system, repo)."),
+    repos: Optional[str] = typer.Option(None, help="Comma-separated repo names (default: all in the manifest)."),
+    budget: Optional[float] = typer.Option(None, help="USD budget per run (swarm and Claude baselines)."),
+    out: Optional[Path] = typer.Option(None, help="Output dir (default evals/<migration>/<date>)."),
+    config: Optional[Path] = typer.Option(None),
+) -> None:
+    """Run every system on every repo and write one comparison table (markdown + CSV)."""
+    from migration_swarm.core import evals
+
+    _load_dotenv()
+    out_dir = evals.run_eval(migration, manifest, [s.strip() for s in systems.split(",")], runs_per_cell=runs,
+                             repos=[r.strip() for r in repos.split(",")] if repos else None, budget=budget,
+                             out_dir=out, config=config)
+    typer.echo((out_dir / "results.md").read_text())
+
+
 def main() -> None:  # pragma: no cover
     app()
 

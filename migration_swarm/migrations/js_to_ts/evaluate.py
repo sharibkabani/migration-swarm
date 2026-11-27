@@ -74,15 +74,27 @@ def _write_eval_tsconfig(tree: Path, spec: RepoSpec, style: str, node_major: int
     (tree / EVAL_TSCONFIG).write_text(json.dumps(cfg, indent=2) + "\n")
 
 
+def _judge_version() -> str:
+    """Prepared token streams depend on the judge script; a change invalidates cached preps."""
+    import hashlib
+    from migration_swarm.migrations.js_to_ts import tools
+    return hashlib.sha256((tools.NODE_DIR / "judge.mjs").read_bytes() + tools.image_tag().encode()).hexdigest()[:16]
+
+
 def prepare(entry: dict, clone_src: Path, prep_dir: Path) -> dict:
     """Pristine baseline for one repo: file list, baseline tests, original compiled tokens, protected hashes."""
     if (prep_dir / "prep.json").exists():
-        return json.loads((prep_dir / "prep.json").read_text())
+        cached = json.loads((prep_dir / "prep.json").read_text())
+        if cached.get("judge_version") == _judge_version():
+            return cached
     prep_dir.mkdir(parents=True, exist_ok=True)
     spec = spec_from_entry(entry)
     tree = prep_dir / "tree"
     if not tree.exists():
         clone_at(clone_src, entry["pre_migration_sha"], tree)
+    for stale in ("orig_emit", "orig_norm"):
+        if (prep_dir / stale).exists():
+            shutil.rmtree(prep_dir / stale)
     ctx = _ctx(prep_dir, tree, spec, str(clone_src))
     a = analyzer.analyze(ctx)                           # also installs dependencies
     protected = integrity.snapshot(tree, spec.test_paths, regex=analyzer.DEFAULT_TEST_RE)
@@ -98,7 +110,7 @@ def prepare(entry: dict, clone_src: Path, prep_dir: Path) -> dict:
     (tree / EVAL_TSCONFIG).unlink()
     prep = {"name": entry["name"], "files": a.files, "loc": a.loc, "total_loc": a.total_loc,
             "baseline": baseline.to_json(), "node_major": node_major, "module_style": style,
-            "protected": protected, "prep_dir": str(prep_dir)}
+            "protected": protected, "prep_dir": str(prep_dir), "judge_version": _judge_version()}
     (prep_dir / "prep.json").write_text(json.dumps(prep, indent=1))
     return prep
 

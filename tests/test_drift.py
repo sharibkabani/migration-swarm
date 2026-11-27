@@ -8,7 +8,7 @@ from migration_swarm.migrations.js_to_ts import tools
 from migration_swarm.migrations.js_to_ts.judge import drift
 
 FIXTURE = Path(__file__).parent / "fixtures" / "drift"
-CASES = ["options.js", "parser.js", "fns.js", "jsdoc.js", "gutted.js"]
+CASES = ["options.js", "parser.js", "fns.js", "jsdoc.js", "parens.js", "gutted.js", "precedence.js"]
 
 
 def _tokens(tmp_path, side):
@@ -21,11 +21,12 @@ def _tokens(tmp_path, side):
 @pytest.mark.docker
 def test_equivalent_commonjs_export_forms_have_no_drift_but_gutting_is_caught(tmp_path):
     orig, cand = _tokens(tmp_path, "orig"), _tokens(tmp_path, "cand")
-    for case in ("options.js", "parser.js", "fns.js", "jsdoc.js"):
+    for case in ("options.js", "parser.js", "fns.js", "jsdoc.js", "parens.js"):
         removed, added, rex, aex = drift(orig[case], cand[case])
         assert (removed, added) == (0, 0), (case, rex, aex)
     removed, added, rex, _ = drift(orig["gutted.js"], cand["gutted.js"])
     assert removed >= 3 and "a + 1" in rex[0]
+    assert drift(orig["precedence.js"], cand["precedence.js"])[0] > 0   # dropping needed parens is a change
 
 
 def test_drift_counts_tokens():

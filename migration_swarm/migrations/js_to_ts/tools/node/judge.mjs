@@ -182,8 +182,21 @@ function isPlumbing(toks) {
     /^exports \. [\w$]+ = (exports \. [\w$]+ = )*void 0 ;?$/.test(s) ||
     /^exports \. ([\w$]+) = \1 ;?$/.test(s);
 }
+// Drop every parenthesized expression; the factory's update functions re-insert exactly the
+// parentheses that precedence requires, so redundant parens vanish but `(a + b) * c` survives.
+function stripRedundantParens(sf) {
+  const visit = (ctx) => (node) => {
+    while (ts.isParenthesizedExpression(node)) node = node.expression;
+    return ts.visitEachChild(node, visit(ctx), ctx);
+  };
+  const res = ts.transform(sf, [(ctx) => (root) => ts.visitEachChild(root, visit(ctx), ctx)]);
+  const printed = ts.createPrinter({ removeComments: true }).printFile(res.transformed[0]);
+  res.dispose();
+  return printed;
+}
 function canonicalTokens(text) {
-  const sf = ts.createSourceFile("x.js", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const sf0 = ts.createSourceFile("x.js", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const sf = ts.createSourceFile("x.js", stripRedundantParens(sf0), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const toks = [];
   for (const st of sf.statements) {
     const t = [];
@@ -199,6 +212,7 @@ function canonicalTokens(text) {
     }
     if (t === "exports" && toks[i + 1] === "." && /^[\w$]+$/.test(toks[i + 2] || "")) { out.push(toks[i + 2]); i += 2; continue; }
     if (t === "function" && /^[\w$]+$/.test(toks[i + 1] || "") && toks[i + 2] === "(") { out.push(toks[i + 1], "=", "function"); i += 1; continue; }
+    if (t === "(" && /^[\w$]+$/.test(toks[i + 1] || "") && toks[i + 2] === ")" && toks[i + 3] === "=>") { out.push(toks[i + 1]); i += 2; continue; }
     if (t === "const" || t === "let" || t === "var" || t === ";") continue;
     out.push(t);
   }

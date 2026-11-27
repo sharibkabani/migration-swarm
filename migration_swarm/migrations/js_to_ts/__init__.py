@@ -86,3 +86,57 @@ def apply_steward(ctx: RunContext, setup_info: dict, text: str) -> list[str]:
 
 def finalize(ctx: RunContext, setup_info: dict) -> dict:
     return finalize_mod.finalize(ctx, setup_info, _analysis(ctx))
+
+
+# ---- eval harness surface -----------------------------------------------------------------------
+from migration_swarm.migrations.js_to_ts import evaluate  # noqa: E402
+
+EVAL_DEFINITIONS = evaluate.DEFINITIONS
+# (column label, metric key, format) for the comparison table; every metric is also in the CSVs.
+EVAL_TABLE = [
+    ("success", "success", "pct"),
+    ("tests equal", "tests_equal", "pct"),
+    ("migrated", "migrated_share", "pct"),
+    ("strict-clean files", "strict_clean_share", "pct"),
+    ("strict errors", "strict_errors", "num"),
+    ("test violations", "test_violations", "num"),
+    ("any /kLOC", "esc_explicit_any_per_kloc", "num"),
+    ("ts-ignore etc /kLOC", "ts_directives_per_kloc", "num"),
+    ("as casts /kLOC", "esc_as_cast_per_kloc", "num"),
+    ("non-null /kLOC", "esc_non_null_assertion_per_kloc", "num"),
+    ("runtime tokens changed", "runtime_removed_tokens", "num"),
+    ("cost", "cost_usd", "usd"),
+    ("$/kLOC", "usd_per_kloc", "usd"),
+    ("wall s", "wall_s", "num"),
+    ("retries/unit", "x_retries_per_unit", "num"),
+    ("escalation rate", "x_escalation_rate", "num"),
+    ("degraded files", "x_degraded_files", "num"),
+]
+
+
+def eval_prepare(entry: dict, clone_src: Path, prep_dir: Path) -> dict:
+    return evaluate.prepare(entry, clone_src, prep_dir)
+
+
+def eval_score(entry: dict, prep: dict, tree: Path, eval_dir: Path) -> dict:
+    return evaluate.evaluate(entry, prep, tree, eval_dir)
+
+
+def eval_flatten(m: dict, prep: dict) -> dict:
+    kloc = max(prep["total_loc"], 1) / 1000
+    e = m["escapes"]
+    flat = {k: m[k] for k in ("success", "tests_equal", "migrated_share", "strict_clean_share", "strict_errors",
+                              "migrated_files", "source_files", "tests_passed", "tests_baseline_passed")}
+    flat["test_violations"] = len(m["test_violations"])
+    flat["test_violation_list"] = "; ".join(m["test_violations"])[:500]
+    for k in ESCAPE_KEYS:
+        flat[f"esc_{k}"] = e.get(k, 0)
+        flat[f"esc_{k}_per_kloc"] = round(e.get(k, 0) / kloc, 3)
+    flat["ts_directives_per_kloc"] = round(sum(e.get(k, 0) for k in ("ts_ignore", "ts_expect_error", "ts_nocheck")) / kloc, 3)
+    flat["runtime_removed_tokens"] = e.get("runtime_removed_tokens", 0)
+    return flat
+
+
+from migration_swarm.migrations.js_to_ts import baselines  # noqa: E402
+
+BASELINES = {"ts-migrate": baselines.run_ts_migrate}
