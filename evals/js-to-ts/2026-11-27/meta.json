@@ -1,0 +1,18 @@
+{
+ "date": "2026-11-27",
+ "systems": [
+  "swarm",
+  "ts-migrate"
+ ],
+ "repos": [
+  "cheerio",
+  "yup"
+ ],
+ "runs": 1,
+ "budget": 5.0,
+ "manifest": "benchmarks/js_to_ts/manifest.yaml",
+ "llm_backend": "api",
+ "llm_backend_by_system": {
+  "swarm": "api"
+ }
+}

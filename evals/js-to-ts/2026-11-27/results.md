@@ -1,0 +1,41 @@
+# Eval: js-to-ts (2026-11-27)
+
+Systems: swarm, ts-migrate  ·  repos: cheerio, yup  ·  runs per cell: 1  ·  budget per run: $5.0
+
+Values are mean ± sample standard deviation over runs. Every run is in `runs.csv`.
+
+| system | repo | runs | success | tests equal | migrated | strict-clean files | strict errors | test violations | any /kLOC | ts-ignore etc /kLOC | as casts /kLOC | non-null /kLOC | runtime tokens changed | GT types equivalent | GT types identical | cost | $/kLOC | wall s | retries/unit | escalation rate | degraded files |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| swarm | cheerio | 1 | 100% | 100% | 100% | 100% | 0 | 0 | 150 | 0 | 20.8 | 5.2 | 0 | 7% | 7% | $1.53 | $1.00 | 1.22e+03 | 1.85 | 0.308 | 4 |
+| ts-migrate | cheerio | 3 | 0% | 100% | 100% | 31% | 40.3 ± 3.51 | 0 | 183 | 36 ± 1.35 | 0 | 0 | 0 | 0% | 0% | $0.00 | $0.00 | 5.83 ± 0.577 | - | - | - |
+| ts-migrate | yup | 3 | 0% | 100% | 100% | 73% | 9 | 0 | 160 | 54.9 | 0 | 0 | 0 | 1% | 1% | $0.00 | $0.00 | 8.5 ± 0.7 | - | - | - |
+
+## Metric definitions
+
+```
+migrated_files      source files whose .js is gone and whose .ts exists
+  strict_clean_files  migrated files with zero errors under strict (share is over ALL source files)
+  tests_equal         passed >= baseline passed, failed <= baseline failed, no new failing names,
+                      same exit outcome, no suite-load errors beyond baseline
+  test_violations     protected test files modified, deleted, or renamed with runtime changes
+  success             tests_equal AND no test_violations AND every source file migrated AND
+                      zero strict errors in migrated files
+
+Ground truth (gt_*), for repos with a human migration:
+(see tools/node/gtcompare.mjs for the checker logic):
+  - Both sides are reduced to declarations (.d.ts) emitted by TypeScript 6.0.3: the human migration at
+    `ground_truth_sha` (built with a declaration-only tsconfig over its source dirs, tests excluded) and the
+    system's final tree (the evaluator's own emit; files still in JS get JS-inferred declarations).
+  - Modules are paired by path (with the manifest's ground_truth_path_map, e.g. cheerio lib/ -> src/).
+  - For each symbol the human module exports (for `export =` modules: the whole export and each property),
+    the system's same-named export is compared inside ONE TypeScript program:
+        equivalent    mutually assignable and the system's printed type contains no `any` (lenient: a
+                      non-generic signature can be equivalent to a generic one)
+        identical     equivalent and both printed types are the same string (strict)
+        any_weakened  mutually assignable only thanks to `any` on the system side
+        wider / narrower / incomparable / missing
+  - gt_equivalent_share / gt_identical_share = count / all human-exported symbols in paired modules
+    (missing counts against).
+Caveat: the human migrations sometimes refactored APIs or bumped dependencies in the same change; such
+symbols show up as missing or incomparable. The share is a similarity measure, not a correctness score.
+```
