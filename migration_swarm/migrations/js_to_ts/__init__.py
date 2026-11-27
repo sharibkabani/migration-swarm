@@ -91,7 +91,9 @@ def finalize(ctx: RunContext, setup_info: dict) -> dict:
 # ---- eval harness surface -----------------------------------------------------------------------
 from migration_swarm.migrations.js_to_ts import evaluate  # noqa: E402
 
-EVAL_DEFINITIONS = evaluate.DEFINITIONS
+from migration_swarm.migrations.js_to_ts import ground_truth  # noqa: E402
+
+EVAL_DEFINITIONS = evaluate.DEFINITIONS + "\n\nGround truth (gt_*), for repos with a human migration:\n" + ground_truth.DEFINITION
 # (column label, metric key, format) for the comparison table; every metric is also in the CSVs.
 EVAL_TABLE = [
     ("success", "success", "pct"),
@@ -105,6 +107,8 @@ EVAL_TABLE = [
     ("as casts /kLOC", "esc_as_cast_per_kloc", "num"),
     ("non-null /kLOC", "esc_non_null_assertion_per_kloc", "num"),
     ("runtime tokens changed", "runtime_removed_tokens", "num"),
+    ("GT types equivalent", "gt_equivalent_share", "pct"),
+    ("GT types identical", "gt_identical_share", "pct"),
     ("cost", "cost_usd", "usd"),
     ("$/kLOC", "usd_per_kloc", "usd"),
     ("wall s", "wall_s", "num"),
@@ -134,6 +138,9 @@ def eval_flatten(m: dict, prep: dict) -> dict:
         flat[f"esc_{k}_per_kloc"] = round(e.get(k, 0) / kloc, 3)
     flat["ts_directives_per_kloc"] = round(sum(e.get(k, 0) for k in ("ts_ignore", "ts_expect_error", "ts_nocheck")) / kloc, 3)
     flat["runtime_removed_tokens"] = e.get("runtime_removed_tokens", 0)
+    for k, v in m.items():
+        if k.startswith("gt_"):
+            flat[k] = v
     return flat
 
 

@@ -108,7 +108,9 @@ def prepare(entry: dict, clone_src: Path, prep_dir: Path) -> dict:
     setup_mod.judge_request(ctx, EVAL_TSCONFIG, "orig_emit", emit=True, normalize=a.files, norm_dir="orig_norm",
                             transpile_tokens=protected_tests)
     (tree / EVAL_TSCONFIG).unlink()
-    prep = {"name": entry["name"], "files": a.files, "loc": a.loc, "total_loc": a.total_loc,
+    from migration_swarm.migrations.js_to_ts import ground_truth
+    gt = ground_truth.prepare(entry, prep_dir, clone_src, lambda run_dir, work: _ctx(run_dir, work, spec))
+    prep = {"name": entry["name"], "ground_truth": gt, "files": a.files, "loc": a.loc, "total_loc": a.total_loc,
             "baseline": baseline.to_json(), "node_major": node_major, "module_style": style,
             "protected": protected, "prep_dir": str(prep_dir), "judge_version": _judge_version()}
     (prep_dir / "prep.json").write_text(json.dumps(prep, indent=1))
@@ -191,6 +193,8 @@ def evaluate(entry: dict, prep: dict, final_tree: Path, eval_dir: Path) -> dict:
         "config_errors": [d["message"] for d in config_errors][:5],
         "tests_tail": "" if tests.no_worse_than(baseline) else tests.tail[-1500:],
     }
+    from migration_swarm.migrations.js_to_ts import ground_truth
+    m.update(ground_truth.compare(prep, eval_dir, tree))
     m["success"] = bool(m["tests_equal"] and not violations and len(migrated) == len(files) and m["strict_errors"] == 0)
     (eval_dir / "metrics.json").write_text(json.dumps(m, indent=1))
     return m
