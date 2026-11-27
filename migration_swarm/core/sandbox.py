@@ -56,7 +56,7 @@ def run(
     image: str,
     command: str,
     *,
-    network: bool = False,
+    network: bool | str = False,
     timeout_s: int = 1800,
     env: dict[str, str] | None = None,
     memory: str = "6g",
@@ -83,7 +83,7 @@ def run(
         command = f"{prep} && cd /tmp/w && {command}"
     args = [
         "docker", "run", "--rm", "--init", "--name", name,
-        "--network", "bridge" if network else "none",
+        "--network", network if isinstance(network, str) else ("bridge" if network else "none"),
         "--user", CONTAINER_UID,
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",

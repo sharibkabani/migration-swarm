@@ -139,4 +139,7 @@ def eval_flatten(m: dict, prep: dict) -> dict:
 
 from migration_swarm.migrations.js_to_ts import baselines  # noqa: E402
 
-BASELINES = {"ts-migrate": baselines.run_ts_migrate}
+from migration_swarm.migrations.js_to_ts import claude_baselines  # noqa: E402
+
+BASELINES = {"ts-migrate": baselines.run_ts_migrate, "claude-single": claude_baselines.run_single,
+             "claude-subagents": claude_baselines.run_subagents}

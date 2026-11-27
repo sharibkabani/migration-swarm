@@ -1,0 +1,11 @@
+# Claude Code (native binary) on top of the target repo's own image, so the agent runs the repo's
+# tests on the repo's Node version. Built per base image. TypeScript 6.0.3 + Node 22 for the check script.
+ARG BASE
+FROM node:22-bookworm AS cc
+ARG CLAUDE_CODE_VERSION
+RUN npm install -g --no-audit --no-fund @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} typescript@6.0.3 \
+ && cp -L "$(npm root -g)/@anthropic-ai/claude-code/bin/claude.exe" /claude
+FROM ${BASE}
+COPY --from=cc /claude /usr/local/bin/claude
+COPY --from=cc /usr/local/bin/node /opt/msw-check/node
+COPY --from=cc /usr/local/lib/node_modules/typescript /opt/msw-check/typescript
