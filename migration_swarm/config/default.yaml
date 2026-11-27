@@ -1,0 +1,55 @@
+# migration-swarm defaults. Override with `--config my.yaml` (deep-merged over this file).
+models:
+  worker: anthropic:claude-haiku-5-5
+  escalation: anthropic:claude-sonnet-5-5
+  steward: anthropic:claude-sonnet-5-5
+  planner: anthropic:claude-sonnet-5-5
+effort:            # output_config.effort per role (Haiku 5.5 / Sonnet 5.5 accept low..max)
+  worker: medium
+  escalation: medium
+  steward: medium
+  planner: low
+max_output_tokens: 32000   # per call; responses stream, so large values are safe
+api_max_retries: 8         # SDK retries 429/5xx/connection errors with exponential backoff
+
+budget_usd: 5.0
+per_file_token_cap: 400000 # input+output tokens across all attempts for one unit
+concurrency: 8
+retries_before_escalation: 2
+
+# USD per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing (read 2026-11-27).
+# A tier with `over_prompt_tokens` replaces the base prices for a request whose total prompt
+# (input + cache reads + cache writes) exceeds that many tokens.
+prices:
+  claude-haiku-5-5:
+    input: 0.10
+    output: 0.50
+    cache_write_5m: 0.125
+    cache_write_1h: 0.20
+    cache_read: 0.01
+    long_context: {over_prompt_tokens: 100000, input: 0.50, output: 2.50, cache_write_5m: 0.625, cache_write_1h: 1.00, cache_read: 0.05}
+  claude-sonnet-5-5:
+    input: 2.00
+    output: 10.00
+    cache_write_5m: 2.50
+    cache_write_1h: 4.00
+    cache_read: 0.10
+
+# Per-file escape budgets (pack-defined keys; the core only compares counts to these numbers).
+escape_budgets:
+  explicit_any: 0
+  implicit_any: 0
+  ts_ignore: 0
+  ts_expect_error: 0
+  ts_nocheck: 0
+  as_unknown_as: 0
+  non_null_assertion: 5
+  as_cast: 5
+  runtime_removed_lines: 0
+  runtime_added_lines: 10
+# Budgets lifted (set to unlimited) for the final "degraded" attempt. @ts-ignore/@ts-nocheck never are.
+degraded_lifts: [explicit_any, as_cast, non_null_assertion, as_unknown_as]
+
+judge:
+  bisect_max_test_runs: 12
+  test_timeout_s: 3600
