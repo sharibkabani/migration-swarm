@@ -73,8 +73,8 @@ def worker_prompt(ctx: RunContext, setup_info: dict, unit_files: list[str], retr
               for f in unit_files for p in a.file_externals.get(f, [])} if "npm_exports" in setup_info else None))
 
 
-def parse_worker_output(text: str, unit_files: list[str]):
-    return prompts.parse_worker_output(text, unit_files)
+def parse_worker_output(text: str, unit_files: list[str], previous: dict[str, str] | None = None):
+    return prompts.parse_worker_output(text, unit_files, previous)
 
 
 def judge(ctx: RunContext, setup_info: dict, unit_files: dict[str, list[str]], candidates: dict[str, dict],

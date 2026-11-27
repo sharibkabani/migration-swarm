@@ -23,7 +23,7 @@ effort:            # per role: Claude output_config.effort, OpenAI reasoning_eff
   escalation: medium
   steward: medium
   planner: low
-max_output_tokens: 32000   # per call; responses stream, so large values are safe
+max_output_tokens: 64000   # per call cap (thinking + the file); streamed. Cut-off replies are paid and wasted
 api_max_retries: 8         # SDK retries 429/5xx/connection errors with exponential backoff
 
 # api:  calls the Anthropic API with ANTHROPIC_API_KEY (billed).

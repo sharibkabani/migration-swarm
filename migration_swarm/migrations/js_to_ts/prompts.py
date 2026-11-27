@@ -47,6 +47,19 @@ Reply with exactly this format and nothing else:
 {{"shared_type_requests": [{{"name": "Name", "definition": "export interface Name {{ ... }}", "reason": "why it is shared"}}]}}
 ```"""
 
+EDIT_FORMAT = """Reply with edits to your previous attempt instead of rewriting the file: one block per change,
+
+<<<<<<< SEARCH <path of the .ts file>
+<lines copied exactly from your previous attempt>
+=======
+<the replacement lines>
+>>>>>>> REPLACE
+
+Each SEARCH text must match your previous attempt exactly (same indentation) and occur exactly once in that
+file; include a line or two of context to make it unique. Every change you need must be in an edit. If the
+file needs extensive changes, return the complete file as a ```ts block instead. The optional ```json
+shared_type_requests block may follow either way."""
+
 DEGRADED_NOTE = """FINAL ATTEMPT (degraded mode): earlier attempts failed. You may now use explicit `any`, `as` casts and non-null assertions where a precise type is impractical. Still forbidden: `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, and any runtime change."""
 
 STEWARD_SYSTEM = """You maintain one shared TypeScript type file used across a codebase that is being migrated from JavaScript. Workers request shared types; you merge the requests into the file.
@@ -94,11 +107,14 @@ def worker_messages(*, style: str, shared_path: str, files: dict[str, str], deps
     if dependents:
         parts.append("Modules that import this one (keep the exported API compatible): " + ", ".join(dependents[:30]))
     if retry:
-        parts.append("Your previous attempt was REJECTED by the judge. Fix every problem below and return the complete files again.")
+        parts.append("Your previous attempt was REJECTED by the judge. Fix every problem below.")
         parts.append("Rejection reasons:\n" + "\n".join(f"- {r}" for r in retry["reasons"]))
         if retry.get("previous"):
             prev = "\n".join(f"```ts\n// file: {p}\n{c}\n```" for p, c in retry["previous"].items())
             parts.append("Your previous attempt:\n" + prev)
+            parts.append(EDIT_FORMAT)
+        else:
+            parts.append("Return the complete files again.")
     if degraded:
         parts.append(DEGRADED_NOTE)
     return system, "\n\n".join(parts)
@@ -116,8 +132,33 @@ BLOCK = re.compile(r"```(ts|typescript|json)[ \t]*\n(.*?)\n```", re.S)
 HEADER = re.compile(r"^\s*//\s*file:\s*(\S+)\s*\n")
 
 
-def parse_worker_output(text: str, expected: list[str]) -> tuple[dict[str, str], list[dict], list[str]]:
-    """Returns ({ts_path: content}, shared_type_requests, problems)."""
+EDIT = re.compile(r"^<<<<<<< SEARCH[ \t]+(\S+)[ \t]*\n(.*?)^=======[ \t]*\n(.*?)^>>>>>>> REPLACE[ \t]*$", re.S | re.M)
+
+
+def apply_edits(text: str, previous: dict[str, str], problems: list[str]) -> dict[str, str]:
+    """Apply SEARCH/REPLACE blocks to the previous attempt. Any edit that doesn't apply cleanly is a problem
+    and drops its file (a half-applied file would be judged as if it were the model's intent)."""
+    out = dict(previous)
+    bad: set[str] = set()
+    for n, (path, search, replace) in enumerate(EDIT.findall(text), 1):
+        if path not in out:
+            problems.append(f"edit {n}: `{path}` is not one of your files ({', '.join(out)})")
+            continue
+        hits = out[path].count(search) if search.strip() else 0
+        if hits != 1:
+            what = "is empty" if not search.strip() else "was not found in" if hits == 0 else f"matches {hits} places in"
+            problems.append(f"edit {n} for `{path}`: the SEARCH text {what} your previous attempt "
+                            f"(first line: `{search.splitlines()[0][:100] if search.strip() else ''}`)")
+            bad.add(path)
+            continue
+        out[path] = out[path].replace(search, replace, 1)
+    return {p: c for p, c in out.items() if p not in bad}
+
+
+def parse_worker_output(text: str, expected: list[str], previous: dict[str, str] | None = None
+                        ) -> tuple[dict[str, str], list[dict], list[str]]:
+    """Returns ({ts_path: content}, shared_type_requests, problems). With `previous` (a rejected attempt),
+    SEARCH/REPLACE edits are applied to it; a full ```ts block for a file takes precedence over edits."""
     files: dict[str, str] = {}
     requests: list[dict] = []
     problems: list[str] = []
@@ -130,6 +171,8 @@ def parse_worker_output(text: str, expected: list[str]) -> tuple[dict[str, str],
             except (ValueError, AttributeError):
                 problems.append("the json block was not valid JSON with a shared_type_requests list")
             continue
+        if EDIT.search(body + "\n"):  # edit blocks wrapped in a fence are edits, not a file
+            continue
         m = HEADER.match(body)
         if m:
             path = m.group(1)
@@ -138,13 +181,16 @@ def parse_worker_output(text: str, expected: list[str]) -> tuple[dict[str, str],
             unnamed.append(body)
     if unnamed and len(expected_ts) == 1 and expected_ts[0] not in files:
         files[expected_ts[0]] = unnamed[0]
+    if previous and EDIT.search(text):
+        edited = apply_edits(text, previous, problems)
+        files = {**{p: c for p, c in edited.items() if p not in files}, **files}
     for p in list(files):
         if p not in expected_ts:
             problems.append(f"unexpected file `{p}` in reply (you may only write {', '.join(expected_ts)})")
             del files[p]
     for p in expected_ts:
         if p not in files:
-            problems.append(f"no ```ts block for `{p}` in the reply")
+            problems.append(f"no ```ts block for `{p}` in the reply" + (" (and no edits that applied)" if previous else ""))
     return {p: (c if c.endswith("\n") else c + "\n") for p, c in files.items()}, requests, problems
 
 

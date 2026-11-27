@@ -134,7 +134,7 @@ def build(ctx: RunContext, pack) -> StateGraph:
             ctx.emit("agent_done", agent=uid, unit=uid, error=f"{type(e).__name__}: {e}"[:200])
             return {"error": "llm_error", "detail": f"{type(e).__name__}: {e}"[:500], "attempt": n}
         runs.write_status(ctx)  # persist spend now, so a crash before judging still counts this call
-        out_files, requests, problems = pack.parse_worker_output(r.text, files)
+        out_files, requests, problems = pack.parse_worker_output(r.text, files, (retry or {}).get("previous"))
         if r.stop_reason == "max_tokens":
             problems.append("the reply was cut off at the output token limit")
         ctx.emit("agent_done", agent=uid, unit=uid, cost_usd=r.cost_usd, stop_reason=r.stop_reason,
@@ -247,7 +247,9 @@ def build(ctx: RunContext, pack) -> StateGraph:
                 u = units[uid]
                 while not stop["reason"] and u["status"] == "pending" and (step := ladder(u["attempts"], n_retries)):
                     last = u["history"][-1] if u["history"] else None
-                    retry = {"reasons": last["reasons"], "previous": last.get("output_files")} if last else None
+                    # the latest real draft, even if the last reply had no usable file (e.g. cut off)
+                    prev = next((h["output_files"] for h in reversed(u["history"]) if h.get("output_files")), None)
+                    retry = {"reasons": last["reasons"], "previous": prev} if last else None
                     c = await attempt(uid, unit_files[uid], setup, u["attempts"], step[0], step[1], retry)
                     if c.get("error") in ("budget", "cancelled", "plan_limit"):  # not an attempt; unit stays pending
                         halt(c["error"])
